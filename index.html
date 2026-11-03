@@ -138,6 +138,25 @@ canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: blo
 .bar { background: rgba(13,35,70,.35); box-shadow: none; }
 .bar i { background: linear-gradient(90deg, #2f8cff, #e5283c); }
 .bpm { display: none; }
+.pause-btn { position: fixed; right: calc(16px + env(safe-area-inset-right, 0px)); bottom: calc(22px + env(safe-area-inset-bottom, 0px));
+  width: 54px; height: 54px; border-radius: 50%; border: 2px solid rgba(255,255,255,.85); background: rgba(13,35,70,.35);
+  display: flex; gap: 6px; align-items: center; justify-content: center; cursor: pointer; touch-action: none; }
+.pause-btn span { width: 6px; height: 20px; border-radius: 2px; background: #fff; }
+.pause-btn:focus-visible { outline: 3px solid var(--sun); outline-offset: 3px; }
+.card.menu { background: rgba(13,35,70,.82); padding: 26px 22px; border-radius: 14px; width: min(88vw, 22rem); box-shadow: 0 18px 40px rgba(8,26,60,.4); }
+.card.menu h1 { color: #fff; text-shadow: none; }
+.opts { display: grid; gap: 10px; width: 100%; }
+.opt { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 14px 16px; border-radius: 10px;
+  border: 2px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #fff; font: 600 17px/1 var(--ui); letter-spacing: .06em; cursor: pointer; }
+.opt b { font-weight: 700; letter-spacing: .14em; padding: 6px 12px; border-radius: 6px; background: #2f8cff; }
+.opt[aria-pressed="false"] b { background: rgba(255,255,255,.18); color: #cfe0ff; }
+.opt:focus-visible { outline: 3px solid var(--sun); outline-offset: 2px; }
+.btn.ghost { color: #fff; border-color: rgba(255,255,255,.6); background: transparent; box-shadow: none; }
+.yeti-dist { font: 700 14px/1 var(--ui); letter-spacing: .16em; text-transform: uppercase; color: #ff5a6a;
+  text-shadow: 0 1px 2px rgba(8,26,60,.9) !important; }
+.yeti-dist.close { animation: blink .5s ease-in-out infinite; }
+.yeti-warn { position: fixed; inset: 0; pointer-events: none; opacity: 0;
+  background: radial-gradient(ellipse 120% 55% at 50% 100%, rgba(200,20,40,.55), rgba(200,20,40,0) 70%); }
 .skip { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(40px + env(safe-area-inset-bottom, 0px));
   font: 700 15px/1 var(--ui); letter-spacing: .18em; text-transform: uppercase; color: #fff; pointer-events: none;
   text-shadow: 0 1px 2px rgba(8,26,60,.85); animation: blink 1.2s ease-in-out infinite; }
@@ -169,15 +188,31 @@ canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: blo
   <div class="lvl"><span id="lvl">Level 1</span><span class="lives" id="lives"></span></div>
   <div class="bar"><i id="bar"></i></div>
   <div class="label" id="left"></div>
+  <div class="yeti-dist" id="yetiDist" hidden></div>
 </div>
+<div class="yeti-warn" id="yetiWarn"></div>
 <div class="flash" id="flash"></div>
 <div class="skip" id="skip" hidden>Tap to skip</div>
 <div class="pops" id="pops"></div>
-<div class="hint" id="hint" hidden>Drag left or right to carve. Swipe down and hold to power slide to a stop; lean the swipe left or right to pick the side. Let go early to straighten out and tuck again. Point down the hill to pick up speed. Dodge the trees and rocks.</div>
+<div class="hint" id="hint" hidden>Drag left or right to carve. Swipe down and hold to power slide to a stop; lean the swipe left or right to pick the side. Let go early to straighten out and tuck again. Point down the hill to pick up speed, hit the jumps (hold the screen in the air to starfish, let go before you land), and watch out for the yetis. Dodge the trees and rocks.</div>
 <button class="slam" id="slam" type="button" hidden>SLAM</button>
 <button class="boost" id="boost" type="button" hidden><span>BOOST</span></button>
 <button class="hop" id="hop" type="button" hidden>HOP</button>
 
+<button class="pause-btn" id="pauseBtn" type="button" aria-label="Pause" hidden><span></span><span></span></button>
+<div class="title" id="pauseMenu" hidden>
+  <div class="card menu">
+    <h1 class="small">Paused</h1>
+    <div class="opts">
+      <button class="opt" id="optYeti" type="button" aria-pressed="true"><span>Yeti mode</span><b id="optYetiVal">On</b></button>
+      <button class="opt" id="optSound" type="button" aria-pressed="true"><span>Sound</span><b id="optSoundVal">On</b></button>
+    </div>
+    <div class="actions">
+      <button class="btn" id="resumeBtn" type="button">Resume</button>
+      <button class="btn ghost" id="restartBtn" type="button">Restart level</button>
+    </div>
+  </div>
+</div>
 <div class="title" id="failed" hidden>
   <div class="card">
     <h1 class="small">Game over</h1>
@@ -227,9 +262,24 @@ const waveUniform = [];
 for (let i = 0; i < MAXW; i++) waveUniform.push(new THREE.Vector4(0, 0, 1, 0));
 
 function ampScale() { return 0.8 + 0.25 * env; }
+// snow kickers: each one rises along the fall line to a lip, then drops away so you launch off it
+const ramps = [];
+function rampH(x, z) {
+  let h = 0;
+  for (const r of ramps) {
+    const u = r.z0 - z;                                  // metres downhill from the start of the ramp
+    if (u < 0 || u > r.L) continue;
+    const v = Math.abs(x - r.x);
+    if (v > r.W / 2) continue;
+    const side = Math.min(1, (r.W / 2 - v) / 1.2);       // rounded sides
+    h += r.H * Math.pow(u / r.L, 1.6) * side;
+  }
+  return h;
+}
+function baseH(x, z) { return z * SLOPE + 3.0 * Math.sin(x * 0.011 + 1.3) * Math.sin(z * 0.009) + 1.4 * Math.sin(x * 0.004 - z * 0.006); }
 function Hf(x, z) {
-  // downhill slope plus broad rolling terrain
-  let h = z * SLOPE + 3.0 * Math.sin(x * 0.011 + 1.3) * Math.sin(z * 0.009) + 1.4 * Math.sin(x * 0.004 - z * 0.006);
+  // downhill slope plus broad rolling terrain, plus any jumps
+  let h = baseH(x, z) + rampH(x, z);
   const k = ampScale();
   for (const w of waves) {
     const zc = w.zc + 5 * Math.sin(x * 0.025 + w.ph);
@@ -540,7 +590,8 @@ function joint(a, c, l1, l2, hint, out) {
 const lerp = (a, b, t) => a + (b - a) * t;
 const J = { pel: _v(), hipL: _v(), hipR: _v(), footL: _v(), footR: _v(), kneeL: _v(), kneeR: _v(), neck: _v(), shL: _v(), shR: _v(),
   handL: _v(), handR: _v(), elL: _v(), elR: _v(), tipL: _v(), tipR: _v(), dir: _v(), side: _v(), tmp: _v(), hint: _v() };
-const pose = { tuck: 0.2, lean: 0, lastTravel: 0 };
+const pose = { tuck: 0.2, lean: 0, lastTravel: 0, star: 0 };
+let trickHold = false, trickTime = 0;   // starfish trick: hold the screen in the air
 const PUSH_DUR = 2.3;
 let pushT = 99; // time since the push-off started (99 = not pushing)
 function poseSkier(dt) {
@@ -553,7 +604,11 @@ function poseSkier(dt) {
   if (!grounded) leanT *= 0.3;
   pose.lean += (leanT - pose.lean) * Math.min(1, dt * 8);
   const turning = Math.min(1, Math.abs(pose.lean) / 0.5 + skidAmt);
-  let tuckT = pushing ? 0.1 : Math.min(1, spd / 12) * (1 - 0.65 * turning);
+  // starfish: arms and legs flung out wide while you hold the screen in the air
+  const starT = trickHold && !grounded && state === 'ride' ? 1 : 0;
+  pose.star += (starT - pose.star) * Math.min(1, dt * (starT ? 12 : 9));
+  const st = pose.star;
+  let tuckT = (pushing ? 0.1 : Math.min(1, spd / 12) * (1 - 0.65 * turning)) * (1 - st);
   pose.tuck += (tuckT - pose.tuck) * Math.min(1, dt * (pushing ? 10 : 4));
   const t = pose.tuck, L = pose.lean;
 
@@ -574,6 +629,10 @@ function poseSkier(dt) {
   J.pel.set(shift, hipY * Math.cos(L * 0.6), hipZ);
   const stance = 0.17 + Math.abs(L) * 0.08 + skidAmt * 0.05;
   J.footL.set(-stance, 0.13, 0.02); J.footR.set(stance, 0.13, 0.02);
+  if (st > 0.01) {                                    // legs kicked out into an X
+    J.footL.x -= 0.5 * st; J.footR.x += 0.5 * st;
+    J.footL.y += 0.2 * st; J.footR.y += 0.2 * st;
+  }
   if (kickSide) {
     const f = kickSide < 0 ? J.footL : J.footR;
     f.x += kickSide * 0.38 * kick; f.y += 0.16 * kick; f.z += 0.5 * kick;
@@ -594,7 +653,7 @@ function poseSkier(dt) {
   // skis follow the feet, roll onto their edges in a turn, and splay out on a skate kick
   for (const [ski, f, sd] of [[RIG.skiL, J.footL, -1], [RIG.skiR, J.footR, 1]]) {
     ski.position.set(f.x, f.y - 0.11, f.z);
-    ski.rotation.set(0, kickSide === sd ? -sd * 0.5 * kick : 0, -L * 0.6);
+    ski.rotation.set(0, kickSide === sd ? -sd * 0.5 * kick : 0, -L * 0.6 + sd * 0.7 * st);
   }
 
   // --- upper body: leans forward (deep in a tuck), tilts into the turn ---
@@ -629,6 +688,11 @@ function poseSkier(dt) {
       hand.set(lerp(rideH.x, J.neck.x + sd * 0.12, t), lerp(rideH.y, J.neck.y - 0.02, t), lerp(rideH.z, J.neck.z - 0.32, t));
       pdx = lerp(sd * 0.08, sd * 0.14, t); pdy = lerp(-0.75, 0.0, t); pdz = lerp(0.6, 1, t);
     }
+    if (st > 0.01) {                                  // arms thrown wide and up, poles pointing out
+      const wx = sh.x + sd * 0.58, wy = sh.y + 0.22, wz = sh.z - 0.05;
+      hand.set(lerp(hand.x, wx, st), lerp(hand.y, wy, st), lerp(hand.z, wz, st));
+      pdx = lerp(pdx, sd * 1, st); pdy = lerp(pdy, 0.35, st); pdz = lerp(pdz, 0.1, st);
+    }
     // keep the hand within arm's reach so the arm never stretches
     const reach = J.tmp.subVectors(hand, sh), rl = reach.length();
     if (rl > 0.6) hand.copy(sh).addScaledVector(reach, 0.6 / rl);
@@ -641,6 +705,200 @@ function poseSkier(dt) {
   }
 }
 skier.scale.setScalar(1.55);
+
+// ---------- jumps ----------
+const rampFlagMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a }), rampPoleMat = new THREE.MeshBasicMaterial({ color: 0x3a3f4a });
+const rampEdge = new THREE.LineBasicMaterial({ color: 0x8a1420, transparent: true, opacity: 0.6 });
+let rampTimer = 6;
+function buildRampMesh(r) {
+  // a little grid over the ramp's footprint that follows the real terrain + ramp height
+  const nx = 16, nz = 14, x0 = r.x - r.W / 2 - 0.6, x1 = r.x + r.W / 2 + 0.6, za = r.z0 + 0.6, zb = r.z0 - r.L;
+  const pos = [];
+  const P = (i, j) => { const x = x0 + (x1 - x0) * i / nx, z = za + (zb - za) * j / nz; return [x, Hf(x, z) + 0.03, z]; };
+  for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) {
+    const a = P(i, j), b = P(i + 1, j), c = P(i, j + 1), d = P(i + 1, j + 1);
+    pos.push(...a, ...c, ...b, ...b, ...c, ...d);
+  }
+  // the lip face: a steep drop from the top of the ramp back to the snow
+  for (let i = 0; i < nx; i++) {
+    const xa = x0 + (x1 - x0) * i / nx, xb = x0 + (x1 - x0) * (i + 1) / nx, z = zb + 0.001;
+    const ta = Hf(xa, z) + 0.03, tb = Hf(xb, z) + 0.03, ba = baseH(xa, z - 0.05), bb = baseH(xb, z - 0.05);
+    pos.push(xa, ta, z, xa, ba, z - 0.05, xb, tb, z, xb, tb, z, xa, ba, z - 0.05, xb, bb, z - 0.05);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  const sg = shadeGeo(g, 0xe0303c);
+  const m = new THREE.Mesh(sg, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  m.add(new THREE.LineSegments(new THREE.EdgesGeometry(sg, 28), rampEdge));
+  // orange marker flags on both corners of the lip
+  for (const sx of [-1, 1]) {
+    const fx = r.x + sx * (r.W / 2 + 0.8), fz = zb + 0.5, fy = baseH(fx, fz);
+    const pole = new THREE.Mesh(new THREE.BoxGeometry(0.08, 2.4, 0.08), rampPoleMat); pole.position.set(fx, fy + 1.2, fz); m.add(pole);
+    const flag = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.4, 0.04), rampFlagMat); flag.position.set(fx + sx * 0.3, fy + 2.15, fz); m.add(flag);
+  }
+  scene.add(m);
+  return m;
+}
+function spawnRamp() {
+  const fx = Math.sin(travel), fz = -Math.cos(travel);
+  const ahead = 450 + Math.random() * 200, side = (Math.random() - 0.5) * 70;
+  const x = px + fx * ahead - fz * side, z = pz + fz * ahead + fx * side;
+  const big = Math.random() < 0.35;
+  const r = { x, z0: z, L: big ? 14 : 10, W: big ? 22 : 16, H: big ? 3.4 : 2.2 };
+  for (const o of ramps) if (Math.abs(o.x - r.x) < 50 && Math.abs(o.z0 - r.z0) < 80) return;  // keep jumps apart
+  clearObstacles(o => Math.abs(o.x - r.x) < r.W / 2 + 4 && o.z < r.z0 + 45 && o.z > r.z0 - r.L - 5);
+  ramps.push(r);
+  r.mesh = buildRampMesh(r);
+}
+function clearRamps() { for (const r of ramps) { scene.remove(r.mesh); r.mesh.geometry.dispose(); } ramps.length = 0; }
+function updateRamps(dt) {
+  if (state === 'ride') {
+    rampTimer -= dt;
+    if (rampTimer <= 0) { rampTimer = 4 + Math.random() * 5; spawnRamp(); }
+  }
+  for (let i = ramps.length - 1; i >= 0; i--) {
+    const r = ramps[i];
+    if (r.z0 > pz + 80 || Math.hypot(r.x - px, r.z0 - pz) > 1100) { scene.remove(r.mesh); r.mesh.geometry.dispose(); ramps.splice(i, 1); }
+  }
+}
+
+// ---------- the yetis: a horde of big shaggy low-poly beasts (up to 20) that come at you from ahead and the sides ----------
+// each yeti is 5 meshes (body, two arms, two legs) so a whole horde stays cheap to draw
+const YETI_EDGE = new THREE.LineBasicMaterial({ color: 0x141a2a, transparent: true, opacity: 0.85 });
+const YETI_GEO = (() => {
+  const FUR = 0x5f6f98, SKIN = 0x2b3142, DARK = 0x161b28;   // dark blue-grey fur: easy to spot on white snow
+  const T = (geo, x, y, z, sx, sy, sz) => { geo.scale(sx || 1, sy || 1, sz || 1); geo.translate(x, y, z); return geo; };
+  const bodyParts = [
+    shadeGeo(T(new THREE.IcosahedronGeometry(1, 1), 0, 2.15, 0, 1.15, 1.25, 0.95), FUR, 0.12),
+    shadeGeo(T(new THREE.IcosahedronGeometry(0.8, 0), 0, 1.75, -0.35, 1, 1.05, 0.7), 0x8b9bc2, 0.1),
+    shadeGeo(T(new THREE.IcosahedronGeometry(0.62, 0), 0, 3.35, -0.25), FUR, 0.12),
+    shadeGeo(T(new THREE.BoxGeometry(0.62, 0.5, 0.2), 0, 3.3, -0.75), SKIN),
+    shadeGeo(T(new THREE.BoxGeometry(0.12, 0.08, 0.04), -0.15, 3.4, -0.87), 0xff3b30),
+    shadeGeo(T(new THREE.BoxGeometry(0.12, 0.08, 0.04), 0.15, 3.4, -0.87), 0xff3b30),
+    shadeGeo(T(new THREE.BoxGeometry(0.4, 0.1, 0.06), 0, 3.15, -0.87), 0xffffff),
+  ];
+  const body = mergeGeos(bodyParts);
+  const arm = mergeGeos([shadeGeo(T(new THREE.BoxGeometry(0.5, 1.7, 0.5), 0, -0.85, 0), FUR, 0.1), shadeGeo(T(new THREE.BoxGeometry(0.5, 0.25, 0.55), 0, -1.8, -0.05), DARK)]);
+  const leg = mergeGeos([shadeGeo(T(new THREE.BoxGeometry(0.62, 1.15, 0.62), 0, -0.55, 0), FUR, 0.1), shadeGeo(T(new THREE.BoxGeometry(0.66, 0.2, 0.9), 0, -1.1, -0.15), SKIN)]);
+  return { body, arm, leg, bodyE: new THREE.EdgesGeometry(body, 25), armE: new THREE.EdgesGeometry(arm, 25), legE: new THREE.EdgesGeometry(leg, 25) };
+})();
+function makeYetiModel() {
+  const g = new THREE.Group(), YP = {};
+  const mk = (geo, edges, parent) => { const m = new THREE.Mesh(geo, flatMat); m.add(new THREE.LineSegments(edges, YETI_EDGE)); parent.add(m); return m; };
+  const body = new THREE.Group(); g.add(body); YP.body = body;
+  mk(YETI_GEO.body, YETI_GEO.bodyE, body);
+  for (const sd of [-1, 1]) {
+    const arm = new THREE.Group(); arm.position.set(sd * 1.15, 2.85, 0); body.add(arm); mk(YETI_GEO.arm, YETI_GEO.armE, arm);
+    YP[sd < 0 ? 'armL' : 'armR'] = arm;
+    const leg = new THREE.Group(); leg.position.set(sd * 0.5, 1.15, 0); g.add(leg); mk(YETI_GEO.leg, YETI_GEO.legE, leg);
+    YP[sd < 0 ? 'legL' : 'legR'] = leg;
+  }
+  const sh = new THREE.Mesh(new THREE.PlaneGeometry(4, 4), new THREE.MeshBasicMaterial({ map: glowTex('rgba(15,25,50,0.55)', 'rgba(15,25,50,0)'), transparent: true, depthWrite: false }));
+  sh.rotation.x = -Math.PI / 2 - Math.atan(SLOPE); sh.position.y = 0.08; g.add(sh);
+  g.scale.setScalar(1.35);
+  g.visible = false;
+  scene.add(g);
+  return { g, YP, busy: false };
+}
+const MAX_YETIS = 20;
+const yetiPool = Array.from({ length: MAX_YETIS }, makeYetiModel);
+const yetis = [];
+let yetiTimer = 2, yetiGot = false, yetiRoarT = 0, yetiStepT = 0;
+function yetiTarget() { return Math.min(10, Math.round((8 + level * 3) / 2)); } // how big the horde gets this level (half the old size)
+function resetYeti() {
+  for (const y of yetis) { y.m.g.visible = false; y.m.busy = false; }
+  yetis.length = 0; yetiGot = false; yetiTimer = 1.5;
+  $('yetiDist').hidden = true; $('yetiWarn').style.opacity = 0;
+}
+function dropYeti(y) { y.m.g.visible = false; y.m.busy = false; yetis.splice(yetis.indexOf(y), 1); }
+function spawnYeti() {
+  const m = yetiPool.find(p => !p.busy); if (!m) return;
+  // far out in the haze: mostly ahead of you, some from the sides, all charging in
+  const fx = Math.sin(travel), fz = -Math.cos(travel);
+  let ahead, side;
+  if (Math.random() < 0.6) { ahead = 600 + Math.random() * 250; side = (Math.random() - 0.5) * 500; }
+  else { ahead = -50 + Math.random() * 200; side = (Math.random() < 0.5 ? -1 : 1) * (260 + Math.random() * 160); } // from the sides, alongside you: they can chase but not cut you off at speed
+  const x = px + fx * ahead - fz * side, z = pz + fz * ahead + fx * side;
+  m.busy = true; m.g.visible = true;
+  yetis.push({ m, x, z, y: Hf(x, z), phase: Math.random() * 6, step: 0, cheer: 0, roared: false, pace: 0.85 + Math.random() * 0.35, born: gt });
+}
+function yetiCatch(y) {
+  // one grabs you: you lose a life and the level restarts
+  yetiGot = true;
+  crash('A yeti got you!', false);
+  bike.visible = false;
+  crashT = 2.8; spd = 0;
+  y.cheer = 2.8;
+  for (let i = 0; i < 60; i++) { const a = Math.random() * TAU, v = 2 + Math.random() * 6; spawnSnow(px, py + 1, pz, Math.cos(a) * v, 3 + Math.random() * 6, Math.sin(a) * v, 0.1 + Math.random() * 0.2, 0.8 + Math.random() * 0.6); }
+  roar(1.2); thud();
+}
+function updateOneYeti(y, dt) {
+  const YP = y.m.YP, G = y.m.g;
+  let dx = px - y.x, dz = pz - y.z, dist = Math.hypot(dx, dz) || 1e-3;
+  if (y.cheer > 0) {
+    // victory: hops up and down with its arms over its head
+    y.cheer -= dt; y.phase += dt * 10;
+    YP.armL.rotation.x = YP.armR.rotation.x = Math.PI * 0.9 + Math.sin(y.phase) * 0.2;
+    YP.legL.rotation.x = YP.legR.rotation.x = 0;
+    YP.body.position.y = Math.abs(Math.sin(y.phase * 0.5)) * 0.5;
+  } else if (state === 'ride') {
+    // fast and relentless: you have to keep your speed up to stay ahead, and they sprint to close big gaps
+    // a yeti never outruns a fast skier: it can sprint to close gaps, but never beyond ~85% of your speed
+    // (unless you're slower than its normal pace) - so flat-out speed always gets you away
+    const basePace = (38 + level * 3.7) * y.pace;
+    const runSpd = Math.min(165, basePace + Math.max(0, dist - 120) * 0.18, Math.max(basePace, spd * 0.85));
+    // run straight at you (no cutting you off), so a fast skier can always outrun the ones beside and behind
+    const tx = px, tz = pz;
+    const ax = tx - y.x, az = tz - y.z, ad = Math.hypot(ax, az) || 1e-3;
+    const ox = y.x, oz = y.z;
+    const k = Math.min(1, runSpd * dt / ad);
+    y.x += ax * k; y.z += az * k;
+    // did it run into you this frame? (checks the whole path, so fast head-on passes still count)
+    const r0x = prevPx - ox, r0z = prevPz - oz, r1x = px - y.x, r1z = pz - y.z;
+    const ddx = r1x - r0x, ddz = r1z - r0z, L2 = ddx * ddx + ddz * ddz || 1e-9;
+    const t = Math.max(0, Math.min(1, -(r0x * ddx + r0z * ddz) / L2));
+    const closest = Math.hypot(r0x + ddx * t, r0z + ddz * t);
+    // you're safe in the air: jump over them
+    const airborne = !grounded && py - Hf(px, pz) > 1.2;
+    if (closest < 3 && invuln <= 0 && !yetiGot && !airborne) { yetiCatch(y); return; }
+    dx = px - y.x; dz = pz - y.z; dist = Math.hypot(dx, dz) || 1e-3;
+    y.phase += runSpd * dt * 0.2;
+    const sw = Math.sin(y.phase);
+    YP.legL.rotation.x = sw * 0.85; YP.legR.rotation.x = -sw * 0.85;
+    YP.armL.rotation.x = -sw * 0.9 - 0.3; YP.armR.rotation.x = sw * 0.9 - 0.3;
+    YP.body.position.y = Math.abs(Math.cos(y.phase)) * 0.25;
+    const stepNow = Math.floor(y.phase / Math.PI);
+    if (stepNow !== y.step) { y.step = stepNow; if (dist < 120 && yetiStepT <= 0) { yetiStepT = 0.07; yetiStep(Math.min(0.5, 12 / dist)); } }
+    if (dist < 40 && !y.roared && yetiRoarT <= 0) { y.roared = true; yetiRoarT = 1.2; roar(0.7); }
+    if (dist > 80) y.roared = false;
+    // left behind, or way off: it drops out and a fresh one comes in from the distance
+    const behind = (y.x - px) * Math.sin(travel) - (y.z - pz) * Math.cos(travel) < 0;
+    if ((behind && dist > 450) || dist > 1150) { dropYeti(y); return; }
+  }
+  y.y = Hf(y.x, y.z);
+  G.position.set(y.x, y.y, y.z);
+  G.rotation.y = Math.atan2(-dx, -dz);
+}
+function updateYeti(dt) {
+  if (!yetiOn) { if (yetis.length) resetYeti(); $('yetiDist').hidden = true; yetiWarnEl.style.opacity = 0; return; }
+  yetiRoarT -= dt; yetiStepT -= dt;
+  // keep the horde topped up from the distance
+  if (state === 'ride' && pushT >= PUSH_DUR && yetis.length < yetiTarget()) {
+    yetiTimer -= dt;
+    if (yetiTimer <= 0) { spawnYeti(); yetiTimer = 0.5 + Math.random() * 0.7; }
+  }
+  for (const y of yetis.slice()) updateOneYeti(y, dt);
+  // HUD: how many are out there and how close the nearest one is; a red glow as one closes in
+  const de = $('yetiDist');
+  if (!yetis.length || state !== 'ride') { de.hidden = true; yetiWarnEl.style.opacity = 0; return; }
+  let near = 1e9;
+  for (const y of yetis) near = Math.min(near, Math.hypot(px - y.x, pz - y.z));
+  de.hidden = false;
+  de.textContent = 'Yetis ×' + yetis.length + '  ' + Math.round(near) + ' m';
+  de.classList.toggle('close', near < 40);
+  yetiWarnEl.style.opacity = Math.max(0, Math.min(0.9, (90 - near) / 80)).toFixed(2);
+}
+const yetiWarnEl = $('yetiWarn');
 
 // ---------- ragdoll: on a crash the skier's joints become free particles held together by bone lengths ----------
 const RS = 1.55;                        // rig units -> metres
@@ -949,7 +1207,7 @@ let slamming = false, slamChain = 0, peakY = 0, launchBonus = 1, slamBtn = false
 let boostE = 1, boostHeld = false, boosting = false, boostLock = false, boostWait = 0, fovKick = 0;
 let wavesThisLevel = 0, levelTime = 0;
 let ramp = 0, heading = 0, turnRate = 0, camHeading = 0;
-let travel = 0, skid = 0, skidAmt = 0, pushImp = 0, brakeKey = false, crouchClock = 0; // travel = the way you're actually moving; skid = angle between skis and travel
+let travel = 0, skid = 0, skidAmt = 0, pushImp = 0, brakeKey = false, crouchClock = 0, landSlideT = 0; // travel = the way you're actually moving; skid = angle between skis and travel
 let level = 1, lives = 3, levelStartZ = 0, levelLen = 1200, wallZ = -100000, scoreAtStart = 0, invuln = 0;
 let steer = 0, keyL = false, keyR = false, btn = false, touchSteer = 0;
 let best = 0;
@@ -977,17 +1235,20 @@ prefillWaves();
 // every gap between neighbouring obstacles stays wide enough to squeeze the bike through
 const MIN_GAP = 3.4;
 function fits(x, z, w, d) {
+  for (const r of ramps) {
+    if (Math.abs(x - r.x) < r.W / 2 + w / 2 + 3 && z < r.z0 + 40 + d / 2 && z > r.z0 - r.L - 4 - d / 2) return false;
+  }
   for (const o of obstacles) {
     const gx = Math.abs(o.x - x) - (o.w + w) / 2, gz = Math.abs(o.z - z) - (o.d + d) / 2;
     if (gx < MIN_GAP && gz < MIN_GAP) return false; // overlapping or too tight to squeeze past
   }
   return true;
 }
-function spawnObstacle(x0, z0) {
+function spawnObstacle(x0, z0, force) {
   // most obstacles are pines (some huge), the rest rocks and long rock ridges
   const r = Math.random();
-  const tower = r < Math.min(0.3, 0.12 + level * 0.03);          // big pine
-  const pine = !tower && r < 0.68;
+  const tower = force === 'bigpine' || (!force && r < Math.min(0.3, 0.12 + level * 0.03)); // big pine
+  const pine = force === 'pine' || (!force && !tower && r < 0.68);
   const wall = !tower && !pine && Math.random() < 0.25 + level * 0.04; // long rock ridge
   let w, h, d, sx, sy, sz;
   if (tower) { sx = sz = 7 + Math.random() * 3; sy = 15 + Math.random() * 6; w = d = sx * 0.55; h = sy; }
@@ -1210,6 +1471,26 @@ function thud() {
   snowBurst(0.7, 600, 0.6, 'lowpass');
   snowBurst(0.45, 2500, 0.25);
 }
+// a deep, rough roar and heavy footsteps for the yeti
+function roar(vol) {
+  if (!actx || !amb) return;
+  const t = actx.currentTime;
+  for (const [f0, f1, type, v] of [[95, 55, 'sawtooth', 0.32], [143, 80, 'square', 0.12]]) {
+    const o = actx.createOscillator(), f = filt('lowpass', 700, 2), g = gainNode(0);
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.linearRampToValueAtTime(f0 * 1.15, t + 0.25); o.frequency.exponentialRampToValueAtTime(f1, t + 1.3);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v * vol, t + 0.12); g.gain.exponentialRampToValueAtTime(0.0001, t + 1.4);
+    o.connect(f); f.connect(g); g.connect(master); o.start(t); o.stop(t + 1.5);
+  }
+  snowBurst(1.2, 400, 0.35 * vol, 'lowpass');
+}
+function yetiStep(vol) {
+  if (!actx || !amb) return;
+  const t = actx.currentTime, o = actx.createOscillator(), g = gainNode(0);
+  o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(35, t + 0.18);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.3);
+  snowBurst(0.18, 900, vol * 0.4);
+}
 function startSynth() {
   mode = 'synth'; curBpm = START_BPM; beatInterval = 60 / START_BPM;
   nextStep = actx.currentTime + 0.1; stepIdx = 0;
@@ -1248,6 +1529,8 @@ function popup(text, cls) {
 // ---------- physics ----------
 const wrap = a => { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; };
 function takeoff() {
+  trickTime = 0;
+  if (state === 'ride' && vy > 6) snowBurst(0.45, 1700, 0.28);   // whoosh off the lip
   grounded = false; airStart = gt; flipAcc = 0; spinVel = btn ? 6.5 : 0;
   slamming = false;
   if (vy > 0 && launchBonus !== 1) {
@@ -1257,6 +1540,47 @@ function takeoff() {
   launchBonus = 1; peakY = py;
 }
 function land(g) {
+  // skiing: land anything; big air scores and thumps into the snow
+  const air = gt - airStart, s = slopeAt(px, pz);
+  const impact = -vy;
+  if (state === 'ride' && trickTime > 0.15) {
+    if (pose.star > 0.5) {
+      // still spread out when you hit the snow: you get nothing and stumble
+      popup('Landed spread-eagle!', 'bad'); spd *= 0.75;
+    } else {
+      const pts = Math.round(trickTime * 1500) * combo;
+      score += pts; combo = Math.min(8, combo + 1);
+      popup('Starfish ' + trickTime.toFixed(1) + 's  +' + pts.toLocaleString(), 'good');
+    }
+  }
+  trickTime = 0;
+  // vertical speed follows the snow along the way you're actually moving (not where the skis point),
+  // otherwise a sideways landing on a steep slope would bounce straight back into the air
+  py = g; grounded = true; spinVel = 0; slamming = false; vy = Math.min(0, slopeAlong(px, pz, travel) * spd);
+  const landSkid = Math.abs(Math.sin(heading - travel));
+  if (state === 'ride' && air > 0.3 && landSkid > 0.45 && spd > 5) {
+    landSlideT = 0.6 + landSkid * 0.9;                   // skis came down across your flight path
+    popup('Sideways landing!', 'small');
+    snowBurst(0.6, 750, 0.4);
+  }
+  pitch = Math.atan(s);
+  if (state !== 'ride') return;
+  if (air > 0.35) {
+    const pts = Math.round(air * 400) * combo;
+    score += pts;
+    if (air > 1.2) popup(air > 2.5 ? 'Huge air!' : 'Big air!', 'good');
+    popup(air.toFixed(1) + 's air  +' + pts.toLocaleString(), 'small');
+    shake = Math.min(1, impact * 0.03);
+    yetiStep(Math.min(0.6, 0.15 + impact * 0.02));
+    snowBurst(0.4, 1200, Math.min(0.5, 0.15 + impact * 0.015));
+    const fwx = Math.sin(travel), fwz = -Math.cos(travel);
+    for (let i = 0; i < Math.min(50, 10 + impact * 2); i++) {
+      const a = Math.random() * TAU, v = 2 + Math.random() * 5;
+      spawnSnow(px, g + 0.1, pz, Math.cos(a) * v + fwx * spd * 0.3, 2 + Math.random() * (2 + impact * 0.2), Math.sin(a) * v + fwz * spd * 0.3, 0.08 + Math.random() * 0.2, 0.5 + Math.random() * 0.6);
+    }
+  }
+}
+function landWaves(g) {
   const s = slopeAt(px, pz), a = Math.atan(s);
   const diff = wrap(pitch - a);
   const air = gt - airStart;
@@ -1363,8 +1687,8 @@ const EARLY_BOOST = [1, 3.1, 2.6, 2.25, 1.35, 1.15];
 const MAX_OBS = 760;
 function targetCount() {
   const early = EARLY_BOOST[level] || 1;
-  // the ski run is a bit less crowded than the neon game
-  return Math.min(MAX_OBS - 20, Math.round(Math.min(64, (4 + (level - 1) * 1.6) * 4 * early) * 12.5 * 0.75));
+  // the ski run is a good bit less crowded than the neon game
+  return Math.min(MAX_OBS - 20, Math.round(Math.min(64, (4 + (level - 1) * 1.6) * 4 * early) * 12.5 * 0.2));
 }
 function inField(x, z) { return z < pz + 20 && Math.hypot(x - px, z - pz) < FIELD_R; }
 // new obstacles always appear far out at the edge of the field (left, ahead or right), never close by;
@@ -1411,6 +1735,7 @@ function startLevel(throughGate) {
     invuln = 1.5; clearObstacles(); levelTime = 0; obsTimer = 0;
   }
   popup('Level ' + level, 'big');
+  if (!throughGate) { resetYeti(); clearRamps(); rampTimer = 4; }
 }
 function levelComplete() {
   const bonus = 1000 * level + lives * 500;
@@ -1482,8 +1807,10 @@ function physics(dt) {
     // carrying you down the mountain while the skis scrub sideways; grip comes back as you slow down
     const curSkid = Math.abs(Math.atan2(Math.sin(heading - travel), Math.cos(heading - travel)));
     const loose = Math.min(1, Math.max(0, (curSkid - 0.2) / 0.3));
-    const grip = Math.max(0.9, 70 / Math.max(spd, 1)) * (1 - loose) + Math.max(1.25, 62 / Math.max(spd, 1)) * loose; // a firmer floor so fast slides still bite
-    const maxBend = (slideIn ? 0 : grip) * dt; // swipe-down stop: no turning at all, you slide straight on sideways
+    const grip = Math.max(1.5, 110 / Math.max(spd, 1)) * (1 - loose) + Math.max(1.7, 85 / Math.max(spd, 1)) * loose; // more edge grip; fast slides still bite
+    // landing sideways off a jump: the skis can't grip, so you power-slide on in the direction you were flying
+    if (landSlideT > 0) { landSlideT -= dt; if (Math.abs(Math.sin(heading - travel)) < 0.18) landSlideT = 0; }
+    const maxBend = (slideIn ? 0 : landSlideT > 0 ? 0.45 : grip) * dt; // swipe-down stop: no turning at all, you slide straight on sideways
     travel += Math.max(-maxBend, Math.min(maxBend, want));
     travel = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, travel));
   }
@@ -1492,6 +1819,7 @@ function physics(dt) {
   skidAmt = slideIn ? Math.max(0.5, Math.abs(Math.sin(skid)))
     : (state === 'ride' && grounded ? Math.max(0, Math.abs(Math.sin(skid)) - 0.08) / 0.92 : 0);
 
+  if (!grounded && state === 'ride' && trickHold) trickTime += dt;
   // gravity pulls you along your path: straight down the fall line is fastest, across the slope
   // gives nothing, and a skid scrubs speed off. Snow friction and air drag set a very high top speed.
   if (state === 'ride' && pushT < PUSH_DUR) {
@@ -1514,9 +1842,9 @@ function physics(dt) {
     const surge = 1 + 1.0 * Math.exp(-crouchClock / 2) * pose.tuck;
     // running straight (not turning, not sliding) lets the skis run free: more pull, less drag
     const straight = Math.max(0, 1 - Math.abs(turnRate) / 1.5) * (1 - Math.min(1, skidAmt * 3));
-    const pull = (1 + 0.6 * straight) * 3.6 * 9.8 * (-along) / Math.sqrt(1 + along * along) * (1 + 0.35 * pose.tuck) * surge
+    const pull = (1 + 0.6 * straight) * 4.6 * 9.8 * (-along) / Math.sqrt(1 + along * along) * (1 + 0.35 * pose.tuck) * surge
       * (stopMode ? 0.15 : 1); // skis held sideways barely glide
-    const friction = 0.5, drag = 0.0005 * (1.4 - 0.6 * pose.tuck) * (1 - 0.35 * straight) * spd * spd;
+    const friction = 0.5, drag = 0.00035 * (1.4 - 0.6 * pose.tuck) * (1 - 0.35 * straight) * spd * spd;
     const brake = skidAmt * (stopMode ? 48 + 0.3 * spd : 16 + 0.1 * spd); // skid braking, stronger the faster you go
     // carving scrubs speed too: a little on gentle turns, a lot on hard ones, more the faster you go
     const turnAmt = stopMode ? 0 : Math.min(1, Math.abs(turnRate) / 4.8);
@@ -1598,6 +1926,7 @@ let swipeY = 0, swipeT = 0, swipeX = 0, swiped = false;
 let ragSkip = false;
 canvas.addEventListener('pointerdown', e => {
   if (rag) { ragSkip = true; return; }
+  if (state === 'ride' && !grounded) trickHold = true;
   if (steerId !== null) return;
   steerId = e.pointerId; steerX = e.clientX; canvas.setPointerCapture(e.pointerId);
   swipeY = e.clientY; swipeX = e.clientX; swipeT = performance.now(); swiped = false;
@@ -1618,7 +1947,7 @@ canvas.addEventListener('pointermove', e => {
 // power-slide stop: skis swing across to the chosen side and skid you to a halt, no turning
 let stopMode = false, stopSide = 1;
 function startStop(side) {
-  if (state !== 'ride' || spd < 1.5) return;
+  if (state !== 'ride' || spd < 1.5 || !grounded) return;
   stopMode = true;
   stopSide = side || Math.sign(heading) || 1;
 }
@@ -1632,16 +1961,18 @@ function straighten() {
 }
 // the slide lasts only while you hold: let go before you've stopped and you straighten back into the tuck;
 // hold all the way to a stop and you stay stopped
-const endSteer = e => { if (e.pointerId === steerId) { steerId = null; touchSteer = 0; if (stopMode) straighten(); } };
+const endSteer = e => { trickHold = false; if (e.pointerId === steerId) { steerId = null; touchSteer = 0; if (stopMode) straighten(); } };
 canvas.addEventListener('pointerup', endSteer);
 canvas.addEventListener('pointercancel', endSteer);
 window.addEventListener('keydown', e => {
+  if ((e.key === 'Escape' || e.key === 'p' || e.key === 'P') && (state === 'ride' || state === 'crash')) { e.preventDefault(); setPaused(!paused); return; }
+  if (paused) return;
   if (rag) { ragSkip = true; e.preventDefault(); return; }
   if (e.repeat) return;
   const k = e.key.toLowerCase();
   if (k === 'arrowleft' || k === 'a') keyL = true;
   else if (k === 'arrowright' || k === 'd') keyR = true;
-  else if (k === ' ') { if (state === 'failed') { e.preventDefault(); retryLevel(); } else if (state !== 'title') { e.preventDefault(); setBtn(true); } }
+  else if (k === ' ') { if (state === 'failed') { e.preventDefault(); retryLevel(); } else if (state !== 'title') { e.preventDefault(); if (!grounded) trickHold = true; else setBtn(true); } }
   else if ((k === 'enter' || k === ' ') && state === 'failed') { e.preventDefault(); retryLevel(); }
   else if (k === 's' || k === 'arrowdown' || k === 'shift') { if (state !== 'title') { e.preventDefault(); startStop(keyL ? -1 : keyR ? 1 : 0); } }
   else if (k === 'w' || k === 'arrowup') { if (state === 'ride') { e.preventDefault(); straighten(); } }
@@ -1650,14 +1981,14 @@ window.addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
   if (k === 'arrowleft' || k === 'a') keyL = false;
   else if (k === 'arrowright' || k === 'd') keyR = false;
-  else if (k === ' ') setBtn(false);
+  else if (k === ' ') { setBtn(false); trickHold = false; }
   else if (k === 's' || k === 'arrowdown' || k === 'shift') { if (stopMode) straighten(); }
 });
 
 // ---------- start ----------
 function begin() {
   $('title').hidden = true;
-  for (const id of ['hudL', 'hudR', 'hudC', 'hint']) $(id).hidden = false;
+  for (const id of ['hudL', 'hudR', 'hudC', 'hint', 'pauseBtn']) $(id).hidden = false;
   setTimeout(() => { $('hint').style.opacity = '0'; }, 9000);
   state = 'ride'; score = 0; combo = 1; spd = 0; boost = 0; pushT = 0; pushImp = 0;
   heading = 0; travel = 0; turnRate = 0;
@@ -1667,11 +1998,37 @@ function begin() {
 }
 $('retry').addEventListener('click', retryLevel);
 $('ride').addEventListener('click', () => {
-  initAudio(); actx.resume(); startAmbience(); begin();
+  initAudio(); actx.resume(); startAmbience(); applySound(); begin();
 });
+// ---------- pause menu ----------
+let paused = false, yetiOn = true, soundOn = true;
+try { const o = JSON.parse(localStorage.getItem('powderRunOpts') || '{}'); if (o.yeti === false) yetiOn = false; if (o.sound === false) soundOn = false; } catch (e) {}
+function saveOpts() { try { localStorage.setItem('powderRunOpts', JSON.stringify({ yeti: yetiOn, sound: soundOn })); } catch (e) {} }
+function showOpts() {
+  $('optYeti').setAttribute('aria-pressed', yetiOn); $('optYetiVal').textContent = yetiOn ? 'On' : 'Off';
+  $('optSound').setAttribute('aria-pressed', soundOn); $('optSoundVal').textContent = soundOn ? 'On' : 'Off';
+}
+function applySound() { if (master) master.gain.setTargetAtTime(soundOn ? 0.8 : 0, actx.currentTime, 0.05); }
+function setPaused(v) {
+  if (state === 'title' || state === 'failed') v = false;
+  paused = v;
+  $('pauseMenu').hidden = !v;
+  $('pauseBtn').hidden = v || state === 'title';
+  trickHold = false; steerId = null; touchSteer = 0; keyL = keyR = false;
+  if (actx) { if (v) actx.suspend(); else actx.resume(); }
+  if (v) showOpts();
+}
+$('pauseBtn').addEventListener('click', () => setPaused(true));
+$('resumeBtn').addEventListener('click', () => setPaused(false));
+$('restartBtn').addEventListener('click', () => { setPaused(false); if (rag) endRagdoll(); restartLevel(); });
+$('optYeti').addEventListener('click', () => { yetiOn = !yetiOn; if (!yetiOn) resetYeti(); saveOpts(); showOpts(); });
+$('optSound').addEventListener('click', () => { soundOn = !soundOn; saveOpts(); showOpts(); applySound(); });
+showOpts();
 document.addEventListener('visibilitychange', () => {
   if (!actx) return;
-  if (document.hidden) actx.suspend(); else if (state !== 'title') actx.resume();
+  // leaving the app pauses the game
+  if (document.hidden) { actx.suspend(); if (state === 'ride' || state === 'crash') setPaused(true); }
+  else if (state !== 'title' && !paused) actx.resume();
 });
 
 // ---------- loop ----------
@@ -1685,6 +2042,7 @@ let lookX = 0, camRoll = 0, camLift = 0, ragZoom = 0, ragAir = 0;
 function frame(now) {
   requestAnimationFrame(frame);
   if (document.hidden) { last = now; return; }
+  if (paused) { last = now; renderer.render(scene, camera); return; }
   const dt = Math.min(1 / 30, (now - last) / 1000); last = now;
   gt += dt;
 
@@ -1746,7 +2104,8 @@ function frame(now) {
       px = P.x; pz = P.z; py = Hf(px, pz); spd = 0; vx = 0;
       if (done || ragSkip) crashT = 0;
     } else {
-      spd += (8 - spd) * Math.min(1, dt * 2);
+      if (yetiGot) spd = 0;
+      else spd += (8 - spd) * Math.min(1, dt * 2);
       px += Math.sin(travel) * spd * dt; pz -= Math.cos(travel) * spd * dt;
       const g = Hf(px, pz);
       vy -= G * dt; py += vy * dt; if (py < g) { py = g; vy = Math.abs(vy) * 0.3; }
@@ -1798,6 +2157,8 @@ function frame(now) {
     if (o.z > pz + 40 || far > FIELD_R + 80) dropObstacle(i);
   }
   if (state === 'ride' && pz < wallZ) levelComplete();
+  updateYeti(dt);
+  updateRamps(dt);
 
   // explosion
   if (pLife > 0) {
@@ -1953,20 +2314,22 @@ function frame(now) {
   camHeading += (camTarget - camHeading) * (1 - Math.exp(-dt * (slideMix > 0.3 ? 4 : 6)));
   const fx = Math.sin(camHeading), fz = -Math.cos(camHeading);
   // during a tumble the camera pulls back and up and tracks his body through the air
-  ragZoom += ((rag ? 1 : 0) - ragZoom) * (1 - Math.exp(-dt * (rag ? 2.5 : 4)));
+  ragZoom += ((rag || yetiGot ? 1 : 0) - ragZoom) * (1 - Math.exp(-dt * (rag || yetiGot ? 2.5 : 4)));
   const ragY = rag ? rag.pts.pel.p.y - Hf(px, pz) : 0;
   ragAir += (ragY - ragAir) * (1 - Math.exp(-dt * 4));
   const back = 6.2 + 9 * ragZoom;
   camPos.x = px - fx * back;
   camPos.z = pz - fz * back;
-  camLift += ((py - Hf(px, pz)) * 0.6 - camLift) * (1 - Math.exp(-dt * 3)); // follow hops gently
+  // in the air the camera rises with him and stays right behind, so he never flies out of view
+  const airH = Math.max(0, py - Hf(px, pz));
+  camLift += (airH - camLift) * (1 - Math.exp(-dt * (grounded ? 4 : 9)));
   camPos.y = Math.max(Hf(camPos.x, camPos.z) + 2.6, Hf(px, pz) + 4.6 + camLift + ragZoom * (4 + ragAir * 0.7));
   camRoll += (Math.max(-0.2, Math.min(0.2, -turnRate * 0.07)) - camRoll) * (1 - Math.exp(-dt * 5));
   shake *= Math.exp(-dt * 6);
   camera.position.set(camPos.x + (Math.random() - 0.5) * shake * 0.4, camPos.y + (Math.random() - 0.5) * shake * 0.4, camPos.z);
   camera.up.set(Math.sin(camRoll) * -fz, Math.cos(camRoll), Math.sin(camRoll) * fx);
   const lookAhead = 10 * (1 - ragZoom);
-  camera.lookAt(px + fx * lookAhead, Hf(px + fx * lookAhead, pz + fz * lookAhead) + 0.6 + camLift * 0.75 + ragZoom * ragAir * 0.9, pz + fz * lookAhead); // tilted a little down
+  camera.lookAt(px + fx * lookAhead, Hf(px + fx * lookAhead, pz + fz * lookAhead) + 0.6 + camLift + ragZoom * ragAir * 0.9, pz + fz * lookAhead); // tilted a little down
 
   // world dressing follows the camera
   ground.position.z = Math.round(pz / ROW) * ROW;
