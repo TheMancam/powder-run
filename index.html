@@ -28,6 +28,7 @@ body {
   overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none;
 }
 canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+canvas#speedFx { position: fixed; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
 
 .hud { position: fixed; pointer-events: none; font-variant-numeric: tabular-nums; text-shadow: 0 0 10px rgba(255,47,168,.7); }
 .hud-tl { top: calc(12px + env(safe-area-inset-top, 0px)); left: calc(16px + env(safe-area-inset-left, 0px)); }
@@ -158,6 +159,15 @@ canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: blo
 .opt b { font-weight: 700; letter-spacing: .14em; padding: 6px 12px; border-radius: 6px; background: #2f8cff; }
 .opt[aria-pressed="false"] b { background: rgba(255,255,255,.18); color: #cfe0ff; }
 .opt:focus-visible { outline: 3px solid var(--sun); outline-offset: 2px; }
+.opt.vol { cursor: default; flex-wrap: wrap; row-gap: 12px; }
+.opt.vol input[type=range] { order: 3; flex: 1 1 100%; }
+.opt.vol output { font-weight: 700; letter-spacing: .06em; min-width: 3.2em; text-align: right; }
+.opt.vol input[type=range] { min-width: 0; height: 28px; margin: 0; background: transparent; -webkit-appearance: none; appearance: none; touch-action: none; }
+.opt.vol input[type=range]::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: linear-gradient(90deg, #2f8cff var(--p, 60%), rgba(255,255,255,.22) var(--p, 60%)); }
+.opt.vol input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; margin-top: -8px; border-radius: 50%; background: #fff; border: 3px solid #2f8cff; }
+.opt.vol input[type=range]::-moz-range-track { height: 6px; border-radius: 3px; background: rgba(255,255,255,.22); }
+.opt.vol input[type=range]::-moz-range-progress { height: 6px; border-radius: 3px; background: #2f8cff; }
+.opt.vol input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 3px solid #2f8cff; }
 .btn.ghost { color: #fff; border-color: rgba(255,255,255,.6); background: transparent; box-shadow: none; }
 .yeti-dist { font: 700 14px/1 var(--ui); letter-spacing: .16em; text-transform: uppercase; color: #ff5a6a;
   text-shadow: 0 1px 2px rgba(8,26,60,.9) !important; }
@@ -179,6 +189,7 @@ canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: blo
 
 
 <canvas id="game"></canvas>
+<canvas id="speedFx"></canvas>
 
 <div class="hud hud-tl" id="hudL" hidden>
   <div class="label">Score</div>
@@ -214,6 +225,8 @@ canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: blo
     <div class="opts">
       <button class="opt" id="optYeti" type="button" aria-pressed="true"><span>Yeti mode</span><b id="optYetiVal">On</b></button>
       <button class="opt" id="optSound" type="button" aria-pressed="true"><span>Sound</span><b id="optSoundVal">On</b></button>
+      <button class="opt" id="optMusic" type="button" aria-pressed="true"><span>Music</span><b id="optMusicVal">On</b></button>
+      <label class="opt vol"><span>Music volume</span><input type="range" id="optMusicVol" min="0" max="100" step="1" value="70" aria-label="Music volume"><output id="optMusicVolVal">70%</output></label>
     </div>
     <div class="actions">
       <button class="btn" id="resumeBtn" type="button">Resume</button>
@@ -449,6 +462,38 @@ const ridges = [ridge(7, 120, 1750, 0xa9c2e6, 0xffffff), ridge(31, 70, 1400, 0xc
 
 // ---------- flat-shaded low-poly helpers (colours baked per face, no lights needed) ----------
 const LIGHT = new THREE.Vector3(-0.5, 0.8, 0.35).normalize();
+// smooth (rounded) version of shadeGeo: lighting follows each vertex's normal, so curves look round, not faceted
+function smoothGeo(geo, hex) {
+  geo.computeVertexNormals();
+  const pos = geo.attributes.position, n = geo.attributes.normal, cols = new Float32Array(pos.count * 3);
+  const base = new THREE.Color(hex), c = new THREE.Color(), v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.set(n.getX(i), n.getY(i), n.getZ(i));
+    c.copy(base).multiplyScalar(0.62 + 0.38 * Math.max(0, v.dot(LIGHT)));
+    cols.set([c.r, c.g, c.b], i * 3);
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+  return geo;
+}
+// a round tube along a curve that narrows from r0 to r1
+function taperTube(curve, r0, r1, segs, sides) {
+  const frames = curve.computeFrenetFrames(segs, false), P = [], idx = [], p = new THREE.Vector3();
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, r = typeof r0 === 'function' ? r0(t) : r0 + (r1 - r0) * t, N = frames.normals[i], B = frames.binormals[i];
+    curve.getPointAt(t, p);
+    for (let k = 0; k <= sides; k++) {
+      const a = k / sides * Math.PI * 2, cs = Math.cos(a), sn = Math.sin(a);
+      P.push(p.x + r * (cs * N.x + sn * B.x), p.y + r * (cs * N.y + sn * B.y), p.z + r * (cs * N.z + sn * B.z));
+    }
+  }
+  for (let i = 0; i < segs; i++) for (let k = 0; k < sides; k++) {
+    const a = i * (sides + 1) + k, b = a + sides + 1;
+    idx.push(a, a + 1, b, a + 1, b + 1, b);   // wound so the faces point outward
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setIndex(idx);
+  return g;
+}
 function shadeGeo(geo, hex, jitter) {
   const g = geo.index ? geo.toNonIndexed() : geo;
   g.computeVertexNormals();
@@ -576,6 +621,13 @@ const RIG = {};
 const _v = () => new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0), _right = new THREE.Vector3(1, 0, 0);
 const _bx = _v(), _by = _v(), _bz = _v(), _m4 = new THREE.Matrix4();
+// the upper arm is drawn from a point tucked into the top of the (rounded) body, so it joins the
+// shoulder instead of floating off the corner
+const _shIn = new THREE.Vector3();
+function shoulderRoot(sh, neck, pel, out) {
+  return out.copy(sh).addScaledVector(_shDown.subVectors(neck, sh), 0.32).addScaledVector(_shDown.subVectors(pel, neck), 0.14);
+}
+const _shDown = new THREE.Vector3();
 // stretch a limb box from joint a to joint b, keeping its width facing sideways
 function place(m, a, b) {
   _by.subVectors(b, a); const len = _by.length() || 1e-4; _by.divideScalar(len);
@@ -585,6 +637,7 @@ function place(m, a, b) {
   m.quaternion.setFromRotationMatrix(_m4.makeBasis(_bx, _by, _bz));
   m.position.addVectors(a, b).multiplyScalar(0.5);
   m.scale.set(m.userData.tw, len, m.userData.td);
+  if (m.userData.balls) for (const [bm, end, size] of m.userData.balls) { bm.position.copy(end ? b : a); bm.scale.setScalar(size); }
 }
 // two-bone IK: joint between a and c, bending toward `hint`
 const _d = _v(), _h = _v();
@@ -984,11 +1037,16 @@ const RAG_BONES = [
   ['shL', 'elL'], ['elL', 'handL'], ['shR', 'elR'], ['elR', 'handR'], ['handL', 'tipL'], ['handR', 'tipR'], ['elL', 'tipL'], ['elR', 'tipR'],
   ['hipL', 'kneeL'], ['kneeL', 'footL'], ['hipR', 'kneeR'], ['kneeR', 'footR'], ['head', 'pel']
 ];
+// bounce heights: the hit throws him high (RAG_HIT), then the bounces off the snow start from RAG_HOP0
+// and each is a bit under half the one before
+const RAG_HIT = 8.5, RAG_HOP0 = 2.5, RAG_HOP_DECAY = 0.45;
 function startRagdoll(vx0, vz0) {
   bike.updateMatrixWorld(true);
   const pts = {};
   const names = ['pel', 'neck', 'shL', 'shR', 'elL', 'elR', 'handL', 'handR', 'hipL', 'hipR', 'kneeL', 'kneeR', 'footL', 'footR', 'tipL', 'tipR'];
-  const v0 = new THREE.Vector3(vx0, 3 + Math.random() * 3, vz0);
+  // no pop upward: he starts off moving along the slope (not flat out over it), so he slams and goes down
+  // he moves along the slope, plus the first (biggest) bounce off the hit
+  const v0 = new THREE.Vector3(vx0, Math.min(0, slopeAlong(px, pz, Math.atan2(vx0, -vz0))) * Math.hypot(vx0, vz0) + Math.sqrt(2 * G * RAG_HIT), vz0);
   for (const n of names) {
     const w = skierBody.localToWorld(J[n].clone());
     pts[n] = { p: w, q: w.clone() };
@@ -1000,7 +1058,7 @@ function startRagdoll(vx0, vz0) {
   for (const n in pts) {
     const top = ['head', 'neck', 'shL', 'shR', 'elL', 'elR', 'handL', 'handR', 'tipL', 'tipR'].includes(n);
     const fx = vx0 * (top ? 1.15 : 0.7) + side * (top ? 1 : -0.5), fz = vz0 * (top ? 1.15 : 0.7);
-    const fy = v0.y + (top ? 3 : 0);
+    const fy = v0.y;
     pts[n].q.set(pts[n].p.x - fx * dt, pts[n].p.y - fy * dt, pts[n].p.z - fz * dt);
   }
   const bones = RAG_BONES.map(([a, b]) => [a, b, pts[a].p.distanceTo(pts[b].p)]);
@@ -1009,7 +1067,7 @@ function startRagdoll(vx0, vz0) {
     const w = skierBody.localToWorld(g.position.clone());
     return { g, p: w, v: new THREE.Vector3(vx0 * 0.6 + (k ? 3 : -3), 5 + Math.random() * 4, vz0 * 0.6), r: new THREE.Euler(0, -heading, 0), w: new THREE.Vector3((Math.random() - 0.5) * 18, (Math.random() - 0.5) * 12, (Math.random() - 0.5) * 18), rest: false };
   });
-  rag = { pts, bones, skis, t: 0, still: 0 };
+  rag = { pts, bones, skis, t: 0, still: 0, nb: 0, air: true };
   // the rig is now driven in world space
   bike.position.set(0, 0, 0); bike.rotation.set(0, 0, 0); skierBody.position.set(0, 0, 0); skier.rotation.set(0, 0, 0);
   $('skip').hidden = false;
@@ -1022,7 +1080,7 @@ function stepRagdoll(dt) {
       const P = R.pts[n], p = P.p, q = P.q;
       const vx = (p.x - q.x) * 0.9995, vy = (p.y - q.y) * 0.9995, vz = (p.z - q.z) * 0.9995;
       q.copy(p);
-      p.x += vx; p.y += vy - 16 * h * h; p.z += vz;
+      p.x += vx; p.y += vy - G * h * h; p.z += vz;
     }
     for (let it = 0; it < 6; it++) {
       for (const [a, b, L] of R.bones) {
@@ -1042,7 +1100,12 @@ function stepRagdoll(dt) {
       const P = R.pts[n], p = P.p, q = P.q, g = Hf(p.x, p.z) + 0.08;
       if (p.y <= g + 0.001) {
         const vy = p.y - q.y;
-        if (vy < 0) q.y = p.y + vy * 0.35;
+        // no bounce at all: touching the snow, he moves along it (down the slope, never up off it),
+        // so he tumbles along the ground down the hill instead of sailing off the fall line
+        const gAhead = Math.min(0, Hf(p.x + (p.x - q.x), p.z + (p.z - q.z)) + 0.08 - g);
+        // limbs give a little as they hit (the body's real bounce is below)
+        const bounce = vy < gAhead ? (gAhead - vy) * 0.25 : 0;
+        q.y = p.y - gAhead - bounce;
         q.x = p.x - (p.x - q.x) * 0.975; q.z = p.z - (p.z - q.z) * 0.975;
         q.z += 16 * SLOPE * 0.25 * h * h;                      // the slope keeps dragging him downhill
         if (vy < -0.04 && Math.random() < 0.3) {               // kick up powder where he hits
@@ -1051,11 +1114,31 @@ function stepRagdoll(dt) {
         }
       }
     }
+    // the body as a whole hugs the snow: it may drop with the slope (or rise over a bump with it) but never
+    // separate from it, so at speed he can't sail off crests or get launched like a ball. Limbs still
+    // swing round him freely, so he keeps tumbling. A little hop and bounce is allowed.
+    let cx = 0, cz = 0, cvx = 0, cvy = 0, cvz = 0, cnt = 0;
+    for (const k in R.pts) { const P = R.pts[k]; cx += P.p.x; cz += P.p.z; cvx += P.p.x - P.q.x; cvy += P.p.y - P.q.y; cvz += P.p.z - P.q.z; cnt++; }
+    cx /= cnt; cz /= cnt; cvx /= cnt; cvy /= cnt; cvz /= cnt;
+    const follow = Hf(cx + cvx, cz + cvz) - Hf(cx, cz);       // how far the snow under him drops (or rises) this step
+    // each landing uses up a bounce: the next one may only go RAG_HOP_DECAY as high
+    let ch = 0; for (const k in R.pts) { const P = R.pts[k].p; ch += P.y - Hf(P.x, P.z); } ch /= cnt;
+    if (R.air && ch < 0.45) {
+      // landed: bounce back up, each time a bit under half as high as the last, until it dies out
+      R.air = false; R.nb++;
+      const hb = RAG_HOP0 * Math.pow(RAG_HOP_DECAY, R.nb);
+      if (hb > 0.15) {
+        const kick = follow + Math.sqrt(2 * G * hb) * h - cvy;
+        if (kick > 0) { for (const k in R.pts) R.pts[k].q.y -= kick; cvy += kick; }
+      }
+    } else if (!R.air && ch > 0.8) R.air = true;
+    const hop = Math.sqrt(2 * G * (R.nb ? RAG_HOP0 * Math.pow(RAG_HOP_DECAY, R.nb) : RAG_HIT)) * h;   // the most he may rise off the snow per step
+    if (cvy > follow + hop) { const d = cvy - follow - hop; for (const k in R.pts) R.pts[k].q.y += d; }
   }
   // rolling through snow soaks up energy, so the tumble winds down
   const pel = R.pts.pel.p;
   if (pel.y - Hf(pel.x, pel.z) < 1.2) {
-    const k = Math.pow(0.55, dt);
+    const k = Math.pow(0.75, dt);
     for (const n in R.pts) { const P = R.pts[n]; P.q.x = P.p.x - (P.p.x - P.q.x) * k; P.q.z = P.p.z - (P.p.z - P.q.z) * k; }
   }
   for (const S of R.skis) {
@@ -1131,7 +1214,10 @@ scene.add(trail);
 
 // snow spray: little cubes flung off the skis on hard turns (and a big burst on a wipeout)
 const SN = 520;
-const snowMesh = new THREE.InstancedMesh(shadeGeo(new THREE.BoxGeometry(1, 1, 1), 0xffffff), new THREE.MeshBasicMaterial({ vertexColors: true }), SN);
+// bright snow cubes: only a light touch of face shading so they read as white, not grey
+const snowGeo = shadeGeo(new THREE.BoxGeometry(1, 1, 1), 0xffffff);
+{ const c = snowGeo.attributes.color; for (let i = 0; i < c.count * 3; i++) c.array[i] = 0.9 + 0.1 * (c.array[i] - 0.62) / 0.38; }
+const snowMesh = new THREE.InstancedMesh(snowGeo, new THREE.MeshBasicMaterial({ vertexColors: true }), SN);
 snowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 snowMesh.frustumCulled = false;
 scene.add(snowMesh);
@@ -1143,7 +1229,7 @@ const snowTmp = new THREE.Object3D(), snowCol = new THREE.Color();
 function spawnSnow(x, y, z, vx, vy, vz, size, life) {
   const idx = snowNext, p = snow[idx]; snowNext = (snowNext + 1) % SN;
   Object.assign(p, { life, max: life, x, y, z, vx, vy, vz, s: size, r: Math.random() * 6, vr: (Math.random() - 0.5) * 14 });
-  snowCol.setHSL(0.6, 0.6, 0.9 + Math.random() * 0.1);
+  snowCol.setHSL(0.6, 0.25, 0.97 + Math.random() * 0.03);   // near-pure white with the faintest cool tint
   snowMesh.setColorAt(idx, snowCol);
 }
 function updateSnow(dt) {
@@ -1281,7 +1367,7 @@ let airStart = 0, takeoffOnBeat = false, spd = BASE, boost = 0, combo = 1, score
 let slamming = false, slamChain = 0, peakY = 0, launchBonus = 1, slamBtn = false;
 let boostE = 1, boostHeld = false, boosting = false, boostLock = false, boostWait = 0, fovKick = 0;
 let wavesThisLevel = 0, levelTime = 0;
-let ramp = 0, heading = 0, turnRate = 0, camHeading = 0;
+let ramp = 0, tuckClock = 0, heading = 0, turnRate = 0, camHeading = 0;
 let travel = 0, skid = 0, skidAmt = 0, pushImp = 0, brakeKey = false, crouchClock = 0, landSlideT = 0; // travel = the way you're actually moving; skid = angle between skis and travel
 let level = 1, lives = 3, levelStartZ = 0, levelLen = 1200, wallZ = -100000, scoreAtStart = 0, invuln = 0;
 let steer = 0, keyL = false, keyR = false, btn = false, touchSteer = 0;
@@ -1476,6 +1562,112 @@ function makeNoise(seconds, brown) {
 function loopSrc(buf) { const s = actx.createBufferSource(); s.buffer = buf; s.loop = true; s.start(); return s; }
 function filt(type, f, q) { const n = actx.createBiquadFilter(); n.type = type; n.frequency.value = f; n.Q.value = q || 0.7; return n; }
 function gainNode(v) { const g = actx.createGain(); g.gain.value = v; return g; }
+// ---------- ambient music: slow, original generative synth pads with sparse glassy bells ----------
+// Four warm chords drift by, each swelling in over several seconds and fading out under the next,
+// over a soft low drone. Now and then a bell note (or a short falling run) rings out into a long reverb.
+// Nothing loops exactly: chord voicings, bell timing and notes are picked fresh each time.
+let music = null;
+function makeReverb(seconds) {
+  const len = Math.floor(actx.sampleRate * seconds), b = actx.createBuffer(2, len, actx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = b.getChannelData(ch);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6);
+  }
+  const c = actx.createConvolver(); c.buffer = b; return c;
+}
+const PAD_CHORDS = [                 // D major / Lydian colours: open, bright, unresolved
+  { root: 38, notes: [50, 57, 61, 64, 66] },    // Dmaj9
+  { root: 35, notes: [50, 54, 57, 62, 64] },    // Bm11
+  { root: 31, notes: [50, 55, 59, 61, 66] },    // Gmaj7#11
+  { root: 40, notes: [52, 55, 59, 62, 66] },    // Em9
+  { root: 33, notes: [49, 52, 57, 61, 64] },    // A6/9
+];
+const BELL_NOTES = [74, 76, 78, 81, 83, 86, 88, 90];   // D major pentatonic, up high
+function startMusic() {
+  if (music) return;
+  const bus = gainNode(0), tone = filt('lowpass', 2600, 0.4);
+  const verb = makeReverb(2.6), wet = gainNode(0.9), dry = gainNode(0.4);
+  const echo = actx.createDelay(2); echo.delayTime.value = 0.62;
+  const echoFb = gainNode(0.42), echoWet = gainNode(0.35);
+  // the music gets its own gentle limiter so loud swells never clip (clipping is what crackles)
+  const lim = actx.createDynamicsCompressor();
+  lim.threshold.value = -10; lim.knee.value = 10; lim.ratio.value = 8; lim.attack.value = 0.01; lim.release.value = 0.35;
+  const out = gainNode(1.5);
+  bus.connect(tone); tone.connect(dry); dry.connect(lim); tone.connect(verb); verb.connect(wet); wet.connect(lim); lim.connect(out); out.connect(master);
+  // bells also go through a slow echo
+  const bellIn = gainNode(1);
+  bellIn.connect(bus); bellIn.connect(echo); echo.connect(echoFb); echoFb.connect(echo); echo.connect(echoWet); echoWet.connect(bus);
+  music = { bus, bellIn, chord: -1, nextChord: actx.currentTime + 0.5, nextBell: actx.currentTime + 6 };
+  applyMusic();
+  setInterval(musicTick, 250);
+}
+function applyMusic() {
+  if (!music) return;
+  // 70% (the default) is about twice as loud as before; 100% a bit louder again
+  const v = musicOn ? Math.pow(musicVol / 100, 1.4) * 1.0 : 0;
+  music.bus.gain.setTargetAtTime(v, actx.currentTime, 0.25);
+}
+// one chord = one shared dark, slowly breathing filter; each note is a soft saw plus a triangle
+function padChord(notes, t0, hold, peak) {
+  const end = t0 + hold + 9;
+  const g = gainNode(0), f = filt('lowpass', 520, 0.5);
+  const lfo = actx.createOscillator(), lfoG = gainNode(200);
+  lfo.frequency.value = 0.05 + Math.random() * 0.06; lfo.connect(lfoG); lfoG.connect(f.frequency); lfo.start(t0); lfo.stop(end);
+  for (const m of notes) {
+    const o = actx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(m); o.detune.value = (Math.random() - 0.5) * 12;
+    const tri = actx.createOscillator(); tri.type = 'triangle'; tri.frequency.value = mtof(m); tri.detune.value = (Math.random() - 0.5) * 8;
+    o.connect(f); tri.connect(f); o.start(t0); tri.start(t0); o.stop(end); tri.stop(end);
+  }
+  f.connect(g); g.connect(music.bus);
+  const pk = peak * Math.sqrt(5 / Math.max(1, notes.length));   // same loudness whatever the voicing
+  g.gain.setValueAtTime(0, t0);
+  g.gain.linearRampToValueAtTime(pk, t0 + 5);                // slow swell in
+  g.gain.setValueAtTime(pk, t0 + hold);
+  g.gain.linearRampToValueAtTime(0, t0 + hold + 8);          // long fade under the next chord
+  // tidy up: disconnect once it has finished so nodes never pile up
+  setTimeout(() => { try { g.disconnect(); f.disconnect(); lfoG.disconnect(); } catch (e) {} }, (end - actx.currentTime + 1) * 1000);
+}
+function drone(m, t0, hold) {
+  const o = actx.createOscillator(), g = gainNode(0); o.type = 'sine'; o.frequency.value = mtof(m);
+  o.connect(g); g.connect(music.bus); o.start(t0); o.stop(t0 + hold + 9);
+  g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(0.16, t0 + 6);
+  g.gain.setValueAtTime(0.16, t0 + hold); g.gain.linearRampToValueAtTime(0, t0 + hold + 8);
+}
+function bell(m, t0, vel) {
+  // a glassy bell: a sine with a quieter, slightly sharp overtone, struck and left to ring
+  const g = gainNode(0); g.connect(music.bellIn);
+  for (const [mul, amp, dec] of [[1, 1, 4.5], [2.01, 0.22, 2]]) {
+    const o = actx.createOscillator(), og = gainNode(0); o.type = 'sine'; o.frequency.value = mtof(m) * mul;
+    o.connect(og); og.connect(g); o.start(t0); o.stop(t0 + dec + 0.1);
+    og.gain.setValueAtTime(0, t0); og.gain.linearRampToValueAtTime(amp, t0 + 0.012); og.gain.exponentialRampToValueAtTime(0.0005, t0 + dec);
+    og.gain.linearRampToValueAtTime(0, t0 + dec + 0.05);
+  }
+  g.gain.value = 0.13 * vel;
+  setTimeout(() => { try { g.disconnect(); } catch (e) {} }, (t0 - actx.currentTime + 5) * 1000);
+}
+function musicTick() {
+  if (!music || !actx || actx.state !== 'running') return;
+  const now = actx.currentTime;
+  if (now + 0.5 >= music.nextChord) {
+    // next chord: usually step forward, sometimes wander
+    music.chord = Math.random() < 0.75 ? (music.chord + 1) % PAD_CHORDS.length : Math.floor(Math.random() * PAD_CHORDS.length);
+    const c = PAD_CHORDS[music.chord], t0 = Math.max(now, music.nextChord), hold = 9 + Math.random() * 4;
+    // a fresh voicing each time: drop one note, maybe lift another an octave
+    const notes = c.notes.filter(() => Math.random() > 0.2).map(n => (Math.random() < 0.2 ? n + 12 : n));
+    padChord(notes, t0, hold, 0.11);
+    drone(c.root, t0, hold);
+    music.nextChord = t0 + hold;
+  }
+  if (now + 0.5 >= music.nextBell) {
+    const t0 = Math.max(now, music.nextBell);
+    if (Math.random() < 0.3) {              // a short, falling run of three or four bells
+      let i = 3 + Math.floor(Math.random() * 5);
+      for (let k = 0, n = 3 + Math.floor(Math.random() * 2); k < n && i >= 0; k++, i -= 1 + Math.floor(Math.random() * 2))
+        bell(BELL_NOTES[i], t0 + k * (0.45 + Math.random() * 0.2), 0.8 - k * 0.12);
+    } else bell(BELL_NOTES[Math.floor(Math.random() * BELL_NOTES.length)], t0, 0.6 + Math.random() * 0.4);
+    music.nextBell = t0 + 3.5 + Math.random() * 6;
+  }
+}
 function startAmbience() {
   mode = 'ambient';
   if (amb) return;
@@ -1496,7 +1688,7 @@ function startAmbience() {
   loopSrc(white).connect(scrapeBp); scrapeBp.connect(scrapeG); scrapeG.connect(master);
   const rumbleLp = filt('lowpass', 220, 0.8), rumbleG = gainNode(0);
   loopSrc(brown).connect(rumbleLp); rumbleLp.connect(rumbleG); rumbleG.connect(master);
-  amb = { windLp, windG, airBp, airG, hissHp, hissG, carveBp, carveG, scrapeBp, scrapeG, rumbleG, gust: 0, grit: 0 };
+  amb = { windLp, windG, airBp, airG, hissHp, hissG, carveBp, carveG, scrapeBp, scrapeG, rumbleG, gust: 0, grit: 0, white, nextBreeze: 3 };
 }
 function updateAmbience(dt) {
   if (!amb || !actx) return;
@@ -1504,10 +1696,20 @@ function updateAmbience(dt) {
   const sp = Math.min(1, spd / 70);
   const onSnow = state === 'ride' && grounded && bike.visible;
   amb.gust = 0.5 + 0.5 * Math.sin(gt * 0.23) * Math.sin(gt * 0.11 + 1.7);
-  amb.windG.gain.setTargetAtTime(0.10 + 0.10 * amb.gust + 0.55 * Math.pow(sp, 1.4), t, 0.25);
-  amb.windLp.frequency.setTargetAtTime(320 + 260 * amb.gust + 1400 * sp, t, 0.3);
-  amb.airG.gain.setTargetAtTime(0.012 + 0.02 * amb.gust + 0.06 * sp, t, 0.3);
-  amb.airBp.frequency.setTargetAtTime(700 + 500 * amb.gust + 900 * sp, t, 0.4);
+  // air past your ears: a steady breeze that builds up to 250 mph, then the full rush comes in (full by 450)
+  const mph = state === 'ride' ? spd * 2.237 : 0;
+  const breeze = Math.min(1, mph / 250), rush = Math.max(0, Math.min(1, (mph - 250) / 200));
+  // under 250 mph, soft mountain breezes drift past now and then: a gentle whoosh that swells, sweeps
+  // from one side to the other and fades. They give way to the rush of real speed above 250.
+  amb.nextBreeze -= dt;
+  if (amb.nextBreeze <= 0) {
+    amb.nextBreeze = 4 + Math.random() * 7;
+    if (rush < 0.8) breezeWhoosh(1 - rush);
+  }
+  amb.windG.gain.setTargetAtTime(0.10 + 0.10 * amb.gust + 0.45 * breeze + 0.25 * Math.pow(rush, 1.4), t, 0.25);
+  amb.windLp.frequency.setTargetAtTime(320 + 260 * amb.gust + 350 * breeze + 1100 * rush, t, 0.3);
+  amb.airG.gain.setTargetAtTime(0.012 + 0.02 * amb.gust + 0.05 * breeze + 0.02 * rush, t, 0.3);
+  amb.airBp.frequency.setTargetAtTime(700 + 500 * amb.gust + 250 * breeze + 700 * rush, t, 0.4);
   // skis are silent running straight; they only shred snow when they turn
   const run = onSnow ? Math.min(1, spd / 20) : 0;
   const turnAmt = onSnow && !stopMode ? Math.min(1, Math.abs(turnRate) / 4.8) : 0; // how hard you're turning
@@ -1522,6 +1724,28 @@ function updateAmbience(dt) {
   amb.scrapeG.gain.setTargetAtTime(slide * 0.42 * amb.grit, t, 0.03);
   amb.scrapeBp.frequency.setTargetAtTime(550 + 600 * Math.min(1, spd / 40), t, 0.05);
   amb.rumbleG.gain.setTargetAtTime(slide * 0.5, t, 0.05);
+}
+function breezeWhoosh(level) {
+  const t = actx.currentTime, dur = 2.8 + Math.random() * 2.6;
+  const src = actx.createBufferSource(); src.buffer = amb.white; src.loop = true;
+  const bp = filt('bandpass', 350, 0.9), lp = filt('lowpass', 1800, 0.5), g = gainNode(0);
+  const pan = actx.createStereoPanner ? actx.createStereoPanner() : null;
+  const f0 = 260 + Math.random() * 180, f1 = 650 + Math.random() * 500;
+  bp.frequency.setValueAtTime(f0, t);
+  bp.frequency.linearRampToValueAtTime(f1, t + dur * 0.45);        // the breeze rises...
+  bp.frequency.linearRampToValueAtTime(f0 * 1.1, t + dur);          // ...and sighs away
+  const peak = (0.09 + Math.random() * 0.07) * level;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(peak, t + dur * 0.4);
+  g.gain.linearRampToValueAtTime(peak * 0.7, t + dur * 0.6);
+  g.gain.linearRampToValueAtTime(0, t + dur);
+  src.connect(bp); bp.connect(lp); lp.connect(g);
+  if (pan) {
+    const side = Math.random() < 0.5 ? -1 : 1;
+    pan.pan.setValueAtTime(-0.8 * side, t); pan.pan.linearRampToValueAtTime(0.8 * side, t + dur);   // drifts across
+    g.connect(pan); pan.connect(master);
+  } else g.connect(master);
+  src.start(t, Math.random() * 3); src.stop(t + dur + 0.05);
 }
 // one-off snow sounds: pole plants, skate kicks, wipeouts
 function snowBurst(dur, freq, vol, type) {
@@ -1757,6 +1981,7 @@ function slamFlash(gold) {
   void flashEl.offsetWidth; flashEl.classList.add('on');
 }
 function crash(reason, boom) {
+  tuckClock = 0;
   state = 'crash'; crashT = 1.4; combo = 1; boost = 0; shake = 1; boostHeld = false;
   slamming = false; slamChain = 0; launchBonus = 1;
   lives = Math.max(0, lives - 1);
@@ -1842,10 +2067,10 @@ function levelComplete() {
   ramp = Math.max(ramp, levelStartRamp()); // speed carries through the gate
   startLevel(true);
 }
-// each level restarts a little faster than the one before (+6 m/s ≈ +22 km/h per level)
-function levelStartRamp() { return (level - 1) * 6; }
+// speed never depends on the level: it all comes from the mountain and how long you hold a straight tuck
+function levelStartRamp() { return 0; }
 function respawn() {
-  ramp = levelStartRamp(); spd = 0; pushT = 0; pushImp = 0; heading = 0; turnRate = 0; travel = 0; skid = 0; stopMode = false;
+  ramp = 0; tuckClock = 0; spd = 0; pushT = 0; pushImp = 0; heading = 0; turnRate = 0; travel = 0; skid = 0; stopMode = false;
   state = 'ride'; pendingTrick = null; py = Hf(px, pz); vy = 0; grounded = true; pitch = Math.atan(slopeAt(px, pz));
   bike.visible = true; invuln = 1.6;
   clearObstacles(o => Math.abs(o.z - pz) < 45 && Math.abs(o.x - px) < 30);
@@ -1940,16 +2165,28 @@ function physics(dt) {
     const straight = Math.max(0, 1 - Math.abs(turnRate) / 1.5) * (1 - Math.min(1, skidAmt * 3));
     const pull = (1 + 0.6 * straight) * 4.6 * 9.8 * (-along) / Math.sqrt(1 + along * along) * (1 + 0.35 * pose.tuck) * surge
       * (stopMode ? 0.15 : 1); // skis held sideways barely glide
-    const friction = 0.5, drag = 0.00035 * (1.4 - 0.6 * pose.tuck) * (1 - 0.35 * straight) * spd * spd;
-    const brake = skidAmt * (stopMode ? 48 + 0.3 * spd : 16 + 0.1 * spd); // skid braking, stronger the faster you go
+    // held straight in a knees-bent tuck, speed compounds: after ~6 s you're gaining an extra 7% of your
+    // speed every second on top of gravity. Any turn, skid or stand-up and it drains away quickly.
+    const tuckedStraight = straight > 0.75 && pose.tuck > 0.6 && !stopMode && pushT >= PUSH_DUR;
+    tuckClock = tuckedStraight ? tuckClock + dt : Math.max(0, tuckClock - dt * 4);
+    const compound = spd * 0.07 * Math.min(1, tuckClock / 6);
+    // air drag a fifth of what it was: about double the top speed
+    const friction = 0.5, drag = 0.2 * 0.00035 * (1.4 - 0.6 * pose.tuck) * (1 - 0.35 * straight) * spd * spd;
+    const brake = skidAmt * (stopMode ? 64 + 0.4 * spd : 16 + 0.1 * spd); // skid braking, stronger the faster you go (power slide: 1/3 harder = 25% shorter stops)
     // carving scrubs speed too: a little on gentle turns, a lot on hard ones, more the faster you go
     const turnAmt = stopMode ? 0 : Math.min(1, Math.abs(turnRate) / 4.8);
     const carveDrag = turnAmt * turnAmt * (9 + 0.22 * spd) + turnAmt * (6 + 0.08 * spd);
-    spd += (pull - friction - drag - brake - carveDrag) * dt;
+    // you gain speed pointing down the fall line: full gain within 12 degrees of straight, then less and less
+    // the further across you point (90% at 20, 72% at 30, 48% at 40, 24% at 48), none past 55 degrees.
+    // Off-angle you just carry what you have (drag still applies).
+    const across = Math.abs(wrapA(travel)), cMax = Math.cos(55 / 57.3);
+    const downhill = Math.max(0, Math.min(1, (Math.cos(across) - cMax) / (Math.cos(12 / 57.3) - cMax)));
+    const gain = Math.max(0, pull + compound) * downhill + Math.min(0, pull);
+    spd += (gain - friction - drag - brake - carveDrag) * dt;
   } else if (state === 'title') {
     spd += (BASE - spd) * Math.min(1, dt * 2);
   } else {
-    spd -= 0.00004 * spd * spd * dt;                     // airborne: only air drag
+    spd -= 0.00001 * spd * spd * dt;                     // airborne: only air drag
   }
   spd = Math.max(0, spd);
   if (spd < 2.5 && !stopMode) travel += (heading - travel) * Math.min(1, dt * 8); // nearly stopped: point and go
@@ -1960,6 +2197,9 @@ function physics(dt) {
   if (grounded) {
     const vg = (g - py) / dt;
     if (vg < vy - G * dt) {
+      // launch: keep only two-thirds of the upward speed relative to the mountain's slope, so jumps peak at half the height
+      const vb = (baseH(px, pz) - baseH(prevPx, prevPz)) / dt;
+      if (vy > vb) vy = vb + (vy - vb) * 0.66;
       vy -= G * dt; py += vy * dt; takeoff();
     } else {
       py = g; vy = Math.min(vg, 26);
@@ -2128,15 +2368,17 @@ function begin() {
 }
 $('retry').addEventListener('click', retryLevel);
 $('ride').addEventListener('click', () => {
-  initAudio(); actx.resume(); startAmbience(); applySound(); begin();
+  initAudio(); actx.resume(); startAmbience(); startMusic(); applySound(); begin();
 });
 // ---------- pause menu ----------
-let paused = false, yetiOn = true, soundOn = true;
-try { const o = JSON.parse(localStorage.getItem('powderRunOpts') || '{}'); if (o.yeti === false) yetiOn = false; if (o.sound === false) soundOn = false; } catch (e) {}
-function saveOpts() { try { localStorage.setItem('powderRunOpts', JSON.stringify({ yeti: yetiOn, sound: soundOn })); } catch (e) {} }
+let paused = false, yetiOn = true, soundOn = true, musicOn = true, musicVol = 70;
+try { const o = JSON.parse(localStorage.getItem('powderRunOpts') || '{}'); if (o.yeti === false) yetiOn = false; if (o.sound === false) soundOn = false; if (o.music === false) musicOn = false; if (typeof o.musicVol === 'number') musicVol = Math.max(0, Math.min(100, o.musicVol)); } catch (e) {}
+function saveOpts() { try { localStorage.setItem('powderRunOpts', JSON.stringify({ yeti: yetiOn, sound: soundOn, music: musicOn, musicVol })); } catch (e) {} }
 function showOpts() {
   $('optYeti').setAttribute('aria-pressed', yetiOn); $('optYetiVal').textContent = yetiOn ? 'On' : 'Off';
   $('optSound').setAttribute('aria-pressed', soundOn); $('optSoundVal').textContent = soundOn ? 'On' : 'Off';
+  $('optMusic').setAttribute('aria-pressed', musicOn); $('optMusicVal').textContent = musicOn ? 'On' : 'Off';
+  const vs = $('optMusicVol'); vs.value = musicVol; vs.style.setProperty('--p', musicVol + '%'); $('optMusicVolVal').textContent = musicVol + '%';
 }
 function applySound() { if (master) master.gain.setTargetAtTime(soundOn ? 0.8 : 0, actx.currentTime, 0.05); }
 function setPaused(v) {
@@ -2161,6 +2403,13 @@ $('resumeBtn').addEventListener('click', () => setPaused(false));
 $('restartBtn').addEventListener('click', () => { setPaused(false); if (rag) endRagdoll(); restartLevel(); });
 $('optYeti').addEventListener('click', () => { yetiOn = !yetiOn; if (!yetiOn) resetYeti(); saveOpts(); showOpts(); });
 $('optSound').addEventListener('click', () => { soundOn = !soundOn; saveOpts(); showOpts(); applySound(); });
+$('optMusic').addEventListener('click', () => { musicOn = !musicOn; saveOpts(); showOpts(); applyMusic(); });
+$('optMusicVol').addEventListener('input', e => {
+  musicVol = +e.target.value;
+  if (musicVol > 0 && !musicOn) musicOn = true;           // dragging the slider up turns the music back on
+  showOpts(); applyMusic();
+});
+$('optMusicVol').addEventListener('change', saveOpts);
 showOpts();
 document.addEventListener('visibilitychange', () => {
   if (!actx) return;
@@ -2424,7 +2673,7 @@ function frame(now) {
     const sk = skidAmt, hard = Math.abs(turnRate);
     if (onSnow && spd > 2 && (sk > 0.12 || hard > 2.5)) {
       const n = Math.min(18, Math.round(sk * 14 + Math.min(spd, 60) * sk * 0.12 + (hard > 2.5 ? 2 : 0)));
-      const out = -Math.sign(skid) || -Math.sign(heading) || -Math.sign(turnRate); // the edge you're sliding toward
+      const out = Math.sign(skid) || Math.sign(heading) || Math.sign(turnRate); // the side the spray flies out (swapped)
       const fwx = Math.sin(heading), fwz = -Math.cos(heading);
       const tvx = Math.sin(travel), tvz = -Math.cos(travel);
       for (let q = 0; q < n; q++) {
@@ -2506,6 +2755,52 @@ function frame(now) {
   }
 
   renderer.render(scene, camera);
+  drawSpeedFx(dt);
+}
+// ---------- speed lines: from 180 mph, white streaks rush past from the point you're heading for ----------
+const fxCan = document.getElementById('speedFx'), fx = fxCan.getContext('2d');
+const STREAKS = [], fxV = new THREE.Vector3();
+let fxW = 0, fxH = 0, fxOn = 0;
+function newStreak(s, spread) {
+  s.a = Math.random() * Math.PI * 2;                       // direction out from the vanishing point
+  s.r = 30 + Math.random() * spread;                       // how far out it starts
+  s.v = 0.9 + Math.random() * 0.8;                         // relative speed
+  s.w = 0.6 + Math.random() * 1.8;                         // line thickness
+  return s;
+}
+for (let i = 0; i < 110; i++) STREAKS.push(newStreak({}, 500));
+function drawSpeedFx(dt) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2), w = innerWidth, h = innerHeight;
+  if (fxW !== w * dpr || fxH !== h * dpr) { fxW = fxCan.width = w * dpr; fxH = fxCan.height = h * dpr; }
+  const mph = spd * 2.237;
+  // builds from 180 mph and stops at half strength (reached at 380 mph); any more was too much
+  const target = state === 'ride' && !paused ? Math.max(0, Math.min(0.5, (mph - 180) / 400)) : 0;
+  fxOn += (target - fxOn) * Math.min(1, dt * 4);           // fade in and out smoothly
+  fx.setTransform(1, 0, 0, 1, 0, 0); fx.clearRect(0, 0, fxW, fxH);
+  if (fxOn < 0.01) return;
+  fx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // the vanishing point: a spot far ahead along the way you're moving
+  fxV.set(px + Math.sin(travel) * 300, py, pz - Math.cos(travel) * 300).project(camera);
+  const cx = (fxV.x * 0.5 + 0.5) * w, cy = (-fxV.y * 0.5 + 0.5) * h;
+  const far = Math.hypot(w, h), n = Math.round(30 + 80 * fxOn), rate = (900 + mph * 2.2) * dt;
+  fx.lineCap = 'round';
+  for (let i = 0; i < n; i++) {
+    const s = STREAKS[i];
+    s.r += rate * s.v * (0.35 + s.r / 300);               // accelerate outward like real perspective
+    if (s.r > far) newStreak(s, 120);
+    const len = (40 + mph * 0.12) * s.v * (0.3 + s.r / 400) * (0.5 + fxOn);
+    const r0 = Math.max(18, s.r - len), ca = Math.cos(s.a), sa = Math.sin(s.a);
+    const fade = Math.min(1, (s.r - 30) / 140);            // invisible near the centre, strong at the edges
+    const lw = s.w * (0.6 + s.r / 500), al = 0.55 * fxOn * fade;
+    fx.beginPath(); fx.moveTo(cx + ca * r0, cy + sa * r0); fx.lineTo(cx + ca * s.r, cy + sa * s.r);
+    // a faint blue edge so the streaks still show against white snow, then the bright white core
+    fx.strokeStyle = 'rgba(70,105,160,' + (al * 0.35).toFixed(3) + ')'; fx.lineWidth = lw + 1.6; fx.stroke();
+    fx.strokeStyle = 'rgba(255,255,255,' + al.toFixed(3) + ')'; fx.lineWidth = lw; fx.stroke();
+  }
+  // soft edge vignette so the middle stays clear and the edges feel like they're streaming
+  const g = fx.createRadialGradient(cx, cy, Math.min(w, h) * 0.25, cx, cy, far * 0.6);
+  g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(1, 'rgba(225,238,255,' + (0.22 * fxOn).toFixed(3) + ')');
+  fx.fillStyle = g; fx.fillRect(0, 0, w, h);
 }
 requestAnimationFrame(frame);
 window.addEventListener('pagehide', saveBest);
