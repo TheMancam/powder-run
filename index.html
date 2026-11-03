@@ -141,6 +141,13 @@ canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: blo
 .pause-btn { position: fixed; right: calc(16px + env(safe-area-inset-right, 0px)); bottom: calc(22px + env(safe-area-inset-bottom, 0px));
   width: 54px; height: 54px; border-radius: 50%; border: 2px solid rgba(255,255,255,.85); background: rgba(13,35,70,.35);
   display: flex; gap: 6px; align-items: center; justify-content: center; cursor: pointer; touch-action: none; }
+.star-btn { position: fixed; left: calc(18px + env(safe-area-inset-left, 0px)); bottom: calc(22px + env(safe-area-inset-bottom, 0px));
+  width: 76px; height: 76px; border-radius: 50%; border: 3px solid #ffd166; background: rgba(13,35,70,.35); color: #ffd166;
+  font: 700 36px/1 var(--ui); display: grid; place-items: center; cursor: pointer; touch-action: none;
+  text-shadow: 0 1px 2px rgba(8,26,60,.8); transition: transform .08s, background .08s; }
+.star-btn.held { background: rgba(255,209,102,.45); color: #fff; transform: scale(1.08); }
+.star-btn.ready { box-shadow: 0 0 18px rgba(255,209,102,.8); }
+.star-btn:focus-visible { outline: 3px solid var(--sun); outline-offset: 3px; }
 .pause-btn span { width: 6px; height: 20px; border-radius: 2px; background: #fff; }
 .pause-btn:focus-visible { outline: 3px solid var(--sun); outline-offset: 3px; }
 .card.menu { background: rgba(13,35,70,.82); padding: 26px 22px; border-radius: 14px; width: min(88vw, 22rem); box-shadow: 0 18px 40px rgba(8,26,60,.4); }
@@ -194,12 +201,13 @@ canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: blo
 <div class="flash" id="flash"></div>
 <div class="skip" id="skip" hidden>Tap to skip</div>
 <div class="pops" id="pops"></div>
-<div class="hint" id="hint" hidden>Drag left or right to carve. Swipe down and hold to power slide to a stop; lean the swipe left or right to pick the side. Let go early to straighten out and tuck again. Point down the hill to pick up speed, hit the jumps (hold the screen in the air to starfish, let go before you land), and watch out for the yetis. Dodge the trees and rocks.</div>
+<div class="hint" id="hint" hidden>Drag left or right to carve. Swipe down and hold to power slide to a stop; lean the swipe left or right to pick the side. Let go early to straighten out and tuck again. Point down the hill to pick up speed, hit the jumps (in the air: swipe down to backflip, up to front flip, sideways to spin, hold the star button to starfish), and watch out for the yetis. Dodge the trees and rocks.</div>
 <button class="slam" id="slam" type="button" hidden>SLAM</button>
 <button class="boost" id="boost" type="button" hidden><span>BOOST</span></button>
 <button class="hop" id="hop" type="button" hidden>HOP</button>
 
 <button class="pause-btn" id="pauseBtn" type="button" aria-label="Pause" hidden><span></span><span></span></button>
+<button class="star-btn" id="starBtn" type="button" aria-label="Starfish trick (hold in the air)" hidden>★</button>
 <div class="title" id="pauseMenu" hidden>
   <div class="card menu">
     <h1 class="small">Paused</h1>
@@ -591,7 +599,65 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const J = { pel: _v(), hipL: _v(), hipR: _v(), footL: _v(), footR: _v(), kneeL: _v(), kneeR: _v(), neck: _v(), shL: _v(), shR: _v(),
   handL: _v(), handR: _v(), elL: _v(), elR: _v(), tipL: _v(), tipR: _v(), dir: _v(), side: _v(), tmp: _v(), hint: _v() };
 const pose = { tuck: 0.2, lean: 0, lastTravel: 0, star: 0 };
-let trickHold = false, trickTime = 0;   // starfish trick: hold the screen in the air
+let trickHold = false, trickTime = 0;   // starfish trick: hold the star button in the air
+// flips (swipe down = backflip, up = front flip) and spins (swipe left/right) in the air.
+// One swipe starts a slow rotation. Once it's going, a tap or a swipe any other way settles it at the next
+// upright point. A swipe the same way as the rotation means "keep going" for another full turn.
+// The skier also reads the landing himself: if the snow is coming up he settles on his own in time.
+let flipDir = 0, flipRate = 0, flipAng = 0, spinDir = 0, spinRate = 0, spinAng = 0;
+let trickSettle = false, pendingTrick = null, flipKeep = 0, spinKeep = 0, landIn = 9;
+const FLIP_RATE = 3.3, SPIN_RATE = 3.0;      // about 1.9 s per flip, 2.1 s per 360
+function airborneForTricks() { return state === 'ride' && !grounded && py - Hf(px, pz) > 0.25; }
+function onRampNow() { return state === 'ride' && grounded && rampH(px, pz) > 0.15; }
+const nextUpright = (ang, dir) => { let t = Math.ceil((ang * dir - 0.05) / TAU) * TAU; return t < 0.01 ? TAU : t; };
+function trickSwipe(kind, dir) {
+  if (!airborneForTricks()) {
+    // swiped on the kicker just before the lip: do it as soon as you leave the snow
+    if (onRampNow()) pendingTrick = { kind, dir, t: gt };
+    return;
+  }
+  if (!flipDir && !spinDir) {                                   // nothing going yet: start it
+    if (kind === 'flip') { flipDir = dir; flipRate = FLIP_RATE; } else { spinDir = dir; spinRate = SPIN_RATE; }
+    trickSettle = false; flipKeep = spinKeep = 0;
+    return;
+  }
+  const same = (kind === 'flip' && dir === flipDir) || (kind === 'spin' && dir === spinDir);
+  if (same) {
+    // keep rotating: skip the upright point coming up and go round once more
+    trickSettle = false;
+    // (the skier won't settle himself until he's carried past the upright point that's coming up)
+    if (kind === 'flip') { flipRate = Math.max(flipRate, FLIP_RATE); flipKeep = flipAng * flipDir < flipKeep - 0.3 ? flipKeep + TAU : nextUpright(flipAng, flipDir) + 0.3; }
+    else { spinRate = Math.max(spinRate, SPIN_RATE); spinKeep = spinAng * spinDir < spinKeep - 0.3 ? spinKeep + TAU : nextUpright(spinAng, spinDir) + 0.3; }
+  } else { trickSettle = true; flipKeep = spinKeep = 0; }
+}
+function trickTap() { if (airborneForTricks() && (flipDir || spinDir)) { trickSettle = true; flipKeep = spinKeep = 0; } }
+// how long until the skis hit the snow, looking ahead along the way you're flying
+function timeToLand() {
+  const fx = Math.sin(travel) * spd, fz = -Math.cos(travel) * spd;
+  for (let t = 0.05; t < 4; t += 0.05) {
+    if (py + vy * t - 0.5 * G * t * t <= Hf(px + fx * t, pz + fz * t)) return t;
+  }
+  return 4;
+}
+// time to finish the current rotation to its next upright point and brake to a stop there
+function timeToSettle(ang, dir, rate) {
+  if (!dir) return 0;
+  const rem = nextUpright(ang, dir) - ang * dir;
+  return rem / Math.max(rate, 0.5) + 0.6;
+}
+// advance one rotation axis; when settling, slow down and stop exactly on the next upright point,
+// fast enough to get there before the landing
+function turnAxis(ang, dir, rate, dt) {
+  if (!dir || !rate) return [ang, rate];
+  if (trickSettle) {
+    const rem = nextUpright(ang, dir) - ang * dir, target = nextUpright(ang, dir);
+    const need = Math.min(5.5, rem / Math.max(0.12, landIn - 0.08));   // the minimum speed that still makes it
+    rate = Math.min(Math.max(rate, need), Math.max(0.5, need, Math.sqrt(2 * 2.2 * rem)));
+    if (rate * dt >= rem) return [target * dir, 0];
+  }
+  return [ang + dir * rate * dt, rate];
+}
+const wrapA = a => Math.atan2(Math.sin(a), Math.cos(a));
 const PUSH_DUR = 2.3;
 let pushT = 99; // time since the push-off started (99 = not pushing)
 function poseSkier(dt) {
@@ -609,6 +675,7 @@ function poseSkier(dt) {
   pose.star += (starT - pose.star) * Math.min(1, dt * (starT ? 12 : 9));
   const st = pose.star;
   let tuckT = (pushing ? 0.1 : Math.min(1, spd / 12) * (1 - 0.65 * turning)) * (1 - st);
+  if ((flipDir || spinDir) && !grounded) tuckT = 1 - st;      // tight tuck through flips and spins
   pose.tuck += (tuckT - pose.tuck) * Math.min(1, dt * (pushing ? 10 : 4));
   const t = pose.tuck, L = pose.lean;
 
@@ -739,6 +806,14 @@ function buildRampMesh(r) {
   scene.add(m);
   return m;
 }
+// keep a clear lane through every jump: a long run-in so nothing sits in front of the kicker,
+// and a landing strip past the lip (pine branches reach out about twice their trunk width)
+function inRampLane(r, x, z, size) {
+  const u = r.z0 - z;                                            // metres downhill of the ramp start
+  if (u < -130 || u > r.L + 160) return false;
+  const half = r.W / 2 + size + 5 + (u > r.L ? Math.min(14, (u - r.L) * 0.1) : 0);  // landing strip widens a bit
+  return Math.abs(x - r.x) < half;
+}
 function spawnRamp() {
   const fx = Math.sin(travel), fz = -Math.cos(travel);
   const ahead = 450 + Math.random() * 200, side = (Math.random() - 0.5) * 70;
@@ -746,7 +821,7 @@ function spawnRamp() {
   const big = Math.random() < 0.35;
   const r = { x, z0: z, L: big ? 14 : 10, W: big ? 22 : 16, H: big ? 3.4 : 2.2 };
   for (const o of ramps) if (Math.abs(o.x - r.x) < 50 && Math.abs(o.z0 - r.z0) < 80) return;  // keep jumps apart
-  clearObstacles(o => Math.abs(o.x - r.x) < r.W / 2 + 4 && o.z < r.z0 + 45 && o.z > r.z0 - r.L - 5);
+  clearObstacles(o => inRampLane(r, o.x, o.z, Math.max(o.w, o.d)));
   ramps.push(r);
   r.mesh = buildRampMesh(r);
 }
@@ -1235,9 +1310,7 @@ prefillWaves();
 // every gap between neighbouring obstacles stays wide enough to squeeze the bike through
 const MIN_GAP = 3.4;
 function fits(x, z, w, d) {
-  for (const r of ramps) {
-    if (Math.abs(x - r.x) < r.W / 2 + w / 2 + 3 && z < r.z0 + 40 + d / 2 && z > r.z0 - r.L - 4 - d / 2) return false;
-  }
+  for (const r of ramps) if (inRampLane(r, x, z, Math.max(w, d))) return false;
   for (const o of obstacles) {
     const gx = Math.abs(o.x - x) - (o.w + w) / 2, gz = Math.abs(o.z - z) - (o.d + d) / 2;
     if (gx < MIN_GAP && gz < MIN_GAP) return false; // overlapping or too tight to squeeze past
@@ -1529,7 +1602,7 @@ function popup(text, cls) {
 // ---------- physics ----------
 const wrap = a => { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; };
 function takeoff() {
-  trickTime = 0;
+  trickTime = 0; flipDir = spinDir = 0; flipRate = spinRate = 0; flipAng = spinAng = 0; trickSettle = false; flipKeep = spinKeep = 0;
   if (state === 'ride' && vy > 6) snowBurst(0.45, 1700, 0.28);   // whoosh off the lip
   grounded = false; airStart = gt; flipAcc = 0; spinVel = btn ? 6.5 : 0;
   slamming = false;
@@ -1543,6 +1616,29 @@ function land(g) {
   // skiing: land anything; big air scores and thumps into the snow
   const air = gt - airStart, s = slopeAt(px, pz);
   const impact = -vy;
+  if (state === 'ride' && (flipDir || spinDir)) {
+    const fr = wrapA(flipAng), sr = wrapA(spinAng);
+    const nFlips = Math.floor((Math.abs(flipAng) + 0.75) / TAU), nSpins = Math.floor((Math.abs(spinAng) + 0.6) / TAU);
+    const tricked = flipAng, spun = spinAng;
+    flipDir = spinDir = 0; flipAng = spinAng = 0; trickSettle = false; flipKeep = spinKeep = 0;
+    if (Math.abs(fr) > 0.75 || Math.abs(sr) > 1.35) {
+      // came down on your head, your back, or facing uphill
+      py = g; grounded = true; vy = 0;
+      crash(Math.abs(sr) > 1.35 ? 'Landed backwards' : (fr * Math.sign(tricked) > 0 ? 'Over-rotated' : 'Under-rotated'), true);
+      return;
+    }
+    if (Math.abs(sr) > 0.45) heading = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, heading + sr)); // a bit off: you land sliding
+    if (nFlips || nSpins) {
+      const words = ['', '', 'Double ', 'Triple ', 'Quad '];
+      let name = '';
+      if (nFlips) name += (nFlips < words.length ? words[nFlips] : nFlips + '× ') + (tricked > 0 ? 'backflip' : 'front flip');
+      if (nSpins) name += (name ? ' ' : '') + (360 * nSpins);
+      const pts = Math.round((nFlips * 2500 + nSpins * 1800) * (nFlips && nSpins ? 1.5 : 1)) * combo;
+      score += pts; combo = Math.min(8, combo + nFlips + nSpins);
+      popup(name.charAt(0).toUpperCase() + name.slice(1) + '!', 'beat');
+      popup('+' + pts.toLocaleString(), 'small');
+    }
+  }
   if (state === 'ride' && trickTime > 0.15) {
     if (pose.star > 0.5) {
       // still spread out when you hit the snow: you get nothing and stumble
@@ -1750,7 +1846,7 @@ function levelComplete() {
 function levelStartRamp() { return (level - 1) * 6; }
 function respawn() {
   ramp = levelStartRamp(); spd = 0; pushT = 0; pushImp = 0; heading = 0; turnRate = 0; travel = 0; skid = 0; stopMode = false;
-  state = 'ride'; py = Hf(px, pz); vy = 0; grounded = true; pitch = Math.atan(slopeAt(px, pz));
+  state = 'ride'; pendingTrick = null; py = Hf(px, pz); vy = 0; grounded = true; pitch = Math.atan(slopeAt(px, pz));
   bike.visible = true; invuln = 1.6;
   clearObstacles(o => Math.abs(o.z - pz) < 45 && Math.abs(o.x - px) < 30);
 }
@@ -1883,8 +1979,21 @@ function physics(dt) {
     } else vy -= G * dt;
     py += vy * dt;
     if (py > peakY) peakY = py;
-    const holding = btn && state === 'ride' && !slamming;
-    if (holding) spinVel = 6.5; else spinVel *= Math.exp(-dt * 10);
+    if (pendingTrick) {
+      if (airborneForTricks()) { const q = pendingTrick; pendingTrick = null; trickSwipe(q.kind, q.dir); }
+      else if (gt - pendingTrick.t > 0.8) pendingTrick = null;
+    }
+    if (flipDir || spinDir) {
+      landIn = timeToLand();
+      // the skier sees the snow coming and settles on his own, unless you've told him to keep going
+      const keeping = (flipKeep && flipAng * flipDir < flipKeep) || (spinKeep && spinAng * spinDir < spinKeep);
+      if (!trickSettle && !keeping &&
+          landIn < Math.max(timeToSettle(flipAng, flipDir, flipRate), timeToSettle(spinAng, spinDir, spinRate)) + 0.25) trickSettle = true;
+    }
+    [flipAng, flipRate] = turnAxis(flipAng, flipDir, flipRate, dt);
+    [spinAng, spinRate] = turnAxis(spinAng, spinDir, spinRate, dt);
+    const holding = false;
+    spinVel *= Math.exp(-dt * 10);
     pitch += spinVel * dt; flipAcc += spinVel * dt;
     if (!holding && !slamming && flipAcc < 0.6) pitch += (Math.atan2(vy, spd) * 0.8 - pitch) * Math.min(1, dt * 3);
     if (py <= g) land(g);
@@ -1926,7 +2035,6 @@ let swipeY = 0, swipeT = 0, swipeX = 0, swiped = false;
 let ragSkip = false;
 canvas.addEventListener('pointerdown', e => {
   if (rag) { ragSkip = true; return; }
-  if (state === 'ride' && !grounded) trickHold = true;
   if (steerId !== null) return;
   steerId = e.pointerId; steerX = e.clientX; canvas.setPointerCapture(e.pointerId);
   swipeY = e.clientY; swipeX = e.clientX; swipeT = performance.now(); swiped = false;
@@ -1934,6 +2042,20 @@ canvas.addEventListener('pointerdown', e => {
 canvas.addEventListener('pointermove', e => {
   if (e.pointerId !== steerId) return;
   const dy = e.clientY - swipeY, dx = e.clientX - swipeX, el = performance.now() - swipeT;
+  if (airborneForTricks()) {
+    // in the air every quick swipe is a trick: down = backflip, up = front flip, sideways = spin
+    touchSteer = 0; steerX = e.clientX;
+    if (!swiped && el < 350 && Math.max(Math.abs(dx), Math.abs(dy)) > 38) {
+      if (Math.abs(dy) > Math.abs(dx)) trickSwipe('flip', dy > 0 ? 1 : -1);
+      else trickSwipe('spin', dx > 0 ? 1 : -1);
+      swiped = true;                                   // one trick input per stroke: lift your finger to swipe again
+    } else if (!swiped && el >= 350) { swipeY = e.clientY; swipeX = e.clientX; swipeT = performance.now(); }
+    return;
+  }
+  if (onRampNow() && !swiped && el < 350 && Math.max(Math.abs(dx), Math.abs(dy)) > 38) {
+    if (Math.abs(dy) > Math.abs(dx)) { trickSwipe('flip', dy > 0 ? 1 : -1); swiped = true; return; }
+    if (el < 220 && Math.abs(dx) > 60) trickSwipe('spin', dx > 0 ? 1 : -1);   // a quick flick, not a steer
+  }
   // a mostly-downward movement is a stop gesture, not steering
   const downward = dy > 10 && dy > Math.abs(dx) * 1.2 && el < 400;
   if (!downward && !swiped) touchSteer = Math.max(-1, Math.min(1, (e.clientX - steerX) / 70));
@@ -1961,13 +2083,21 @@ function straighten() {
 }
 // the slide lasts only while you hold: let go before you've stopped and you straighten back into the tuck;
 // hold all the way to a stop and you stay stopped
-const endSteer = e => { trickHold = false; if (e.pointerId === steerId) { steerId = null; touchSteer = 0; if (stopMode) straighten(); } };
+const endSteer = e => { trickHold = false; if (e.pointerId === steerId) {
+  if (e.type === 'pointerup' && !swiped && performance.now() - swipeT < 300 && Math.hypot(e.clientX - swipeX, e.clientY - swipeY) < 20) trickTap(); steerId = null; touchSteer = 0; if (stopMode) straighten(); } };
 canvas.addEventListener('pointerup', endSteer);
 canvas.addEventListener('pointercancel', endSteer);
 window.addEventListener('keydown', e => {
   if ((e.key === 'Escape' || e.key === 'p' || e.key === 'P') && (state === 'ride' || state === 'crash')) { e.preventDefault(); setPaused(!paused); return; }
   if (paused) return;
   if (rag) { ragSkip = true; e.preventDefault(); return; }
+  if (airborneForTricks() && !e.repeat) {
+    const k0 = e.key.toLowerCase();
+    if (k0 === 'arrowdown' || k0 === 's') { e.preventDefault(); trickSwipe('flip', 1); return; }
+    if (k0 === 'arrowup' || k0 === 'w') { e.preventDefault(); trickSwipe('flip', -1); return; }
+    if (k0 === 'arrowleft' || k0 === 'a') { e.preventDefault(); trickSwipe('spin', -1); return; }
+    if (k0 === 'arrowright' || k0 === 'd') { e.preventDefault(); trickSwipe('spin', 1); return; }
+  }
   if (e.repeat) return;
   const k = e.key.toLowerCase();
   if (k === 'arrowleft' || k === 'a') keyL = true;
@@ -1988,7 +2118,7 @@ window.addEventListener('keyup', e => {
 // ---------- start ----------
 function begin() {
   $('title').hidden = true;
-  for (const id of ['hudL', 'hudR', 'hudC', 'hint', 'pauseBtn']) $(id).hidden = false;
+  for (const id of ['hudL', 'hudR', 'hudC', 'hint', 'pauseBtn', 'starBtn']) $(id).hidden = false;
   setTimeout(() => { $('hint').style.opacity = '0'; }, 9000);
   state = 'ride'; score = 0; combo = 1; spd = 0; boost = 0; pushT = 0; pushImp = 0;
   heading = 0; travel = 0; turnRate = 0;
@@ -2014,11 +2144,19 @@ function setPaused(v) {
   paused = v;
   $('pauseMenu').hidden = !v;
   $('pauseBtn').hidden = v || state === 'title';
+  $('starBtn').hidden = v || state === 'title';
   trickHold = false; steerId = null; touchSteer = 0; keyL = keyR = false;
   if (actx) { if (v) actx.suspend(); else actx.resume(); }
   if (v) showOpts();
 }
 $('pauseBtn').addEventListener('click', () => setPaused(true));
+{
+  const sb = $('starBtn');
+  const down = e => { e.preventDefault(); e.stopPropagation(); trickHold = true; sb.classList.add('held'); try { sb.setPointerCapture(e.pointerId); } catch (_) {} };
+  const up = () => { trickHold = false; sb.classList.remove('held'); };
+  sb.addEventListener('pointerdown', down);
+  sb.addEventListener('pointerup', up); sb.addEventListener('pointercancel', up); sb.addEventListener('lostpointercapture', up);
+}
 $('resumeBtn').addEventListener('click', () => setPaused(false));
 $('restartBtn').addEventListener('click', () => { setPaused(false); if (rag) endRagdoll(); restartLevel(); });
 $('optYeti').addEventListener('click', () => { yetiOn = !yetiOn; if (!yetiOn) resetYeti(); saveOpts(); showOpts(); });
@@ -2032,6 +2170,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------- loop ----------
+const starBtnEl = $('starBtn');
 const lvlEl = $('lvl'), livesEl = $('lives'), barEl = $('bar'), leftEl = $('left');
 const bpmEl = $('bpm'), chainEl = $('chain'), scoreEl = $('score'), comboEl = $('combo'), speedEl = $('speed');
 const tmpV = new THREE.Vector3();
@@ -2239,7 +2378,7 @@ function frame(now) {
   else {
     bike.position.set(px, py, pz);
     bike.rotation.order = 'YXZ';
-    bike.rotation.set(pitch, -heading, 0);
+    bike.rotation.set(pitch + flipAng, -heading - spinAng, 0);
     poseSkier(dt);
   }
   // skis swing across the fall line on hard turns, like a carve/skid
@@ -2361,6 +2500,7 @@ function frame(now) {
     const prog = Math.max(0, Math.min(1, (levelStartZ - pz) / levelLen));
     barEl.style.transform = 'scaleX(' + prog.toFixed(4) + ')';
     leftEl.textContent = Math.max(0, Math.round(pz - wallZ)) + ' m to checkpoint';
+    starBtnEl.classList.toggle('ready', airborneForTricks());
     chainEl.textContent = slamChain ? 'Slam chain ' + slamChain : '';
     if (score > best && state === 'crash') saveBest();
   }
