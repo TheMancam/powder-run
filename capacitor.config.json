@@ -1,0 +1,8 @@
+{
+  "appId": "com.themancam.powderrun",
+  "appName": "Powder Run",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#9fc8f0"
+  }
+}

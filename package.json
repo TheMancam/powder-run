@@ -1,0 +1,19 @@
+{
+  "name": "powder-run",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Powder Run: low-poly 3D downhill ski game for Android",
+  "scripts": {
+    "bundle": "node scripts/bundle-assets.js"
+  },
+  "dependencies": {
+    "@capacitor/android": "6.2.0",
+    "@capacitor/core": "6.2.0",
+    "three": "0.128.0",
+    "@fontsource/russo-one": "^5.0.0",
+    "@fontsource/chakra-petch": "^5.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "6.2.0"
+  }
+}
